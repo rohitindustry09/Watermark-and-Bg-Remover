@@ -1,7 +1,5 @@
-import { detectText, detectTint, detectWithModel, findSimilar } from './detect'
-import { recognizeLines } from './ocr'
-import { classifyText } from './overlay'
-import { detectEdgeMarks, toneConsistency } from './marks'
+import { detectText, detectTint, detectWithModel } from './detect'
+import { toneConsistency } from './marks'
 import { toGray } from './overlay'
 import { buildMask } from './mask'
 import { restoreImage, type RestoreResult } from './restore'
@@ -17,35 +15,6 @@ export interface AutoWatermarkReport {
   methods: string[]
   warnings: string[]
   ms: number
-}
-
-const uid = () => crypto.randomUUID()
-
-function crop(source: ImageData, box: [number, number, number, number]): ImageData {
-  const [x0, y0, x1, y1] = box
-  const w = Math.max(1, x1 - x0)
-  const h = Math.max(1, y1 - y0)
-  const full = new OffscreenCanvas(source.width, source.height)
-  full.getContext('2d')!.putImageData(source, 0, 0)
-  const c = new OffscreenCanvas(w, h)
-  const ctx = c.getContext('2d', { willReadFrequently: true })!
-  ctx.drawImage(full, x0, y0, w, h, 0, 0, w, h)
-  return ctx.getImageData(0, 0, w, h)
-}
-
-/**
- * A corner/edge mark found by pixel statistics could be a credit line. Read its own area with OCR and, when the text looks
- * like a copyright / credit / agency mark (even at low OCR confidence), report it so it is not removed automatically.
- */
-async function looksLikeOwnership(source: ImageData, box: [number, number, number, number], signal?: AbortSignal): Promise<string | null> {
-  const pad = 6
-  const b: [number, number, number, number] = [Math.max(0, box[0] - pad), Math.max(0, box[1] - pad), Math.min(source.width, box[2] + pad), Math.min(source.height, box[3] + pad)]
-  const lines = await recognizeLines(crop(source, b), { angles: [], signal })
-  for (const l of lines) {
-    if (l.confidence < 30) continue
-    if (classifyText({ text: l.text, confidence: l.confidence, angle: 0, repeats: 0, contrast: 1 }).category === 'ownership') return l.text
-  }
-  return null
 }
 
 export interface AutoOptions {
@@ -98,29 +67,8 @@ export async function autoRemoveWatermarks(
   }
   regions.push(...detectTint(source))
   const protectedText: string[] = []
-  // Corner/edge mark statistics cannot tell a logo from a bright part of the scene that touches the frame (a metal finial, a lamp),
-  // so they are only used in Thorough mode; the default pass relies on OCR, the colour detector and (optionally) the trained detector.
-  for (const m of opts.thorough ? detectEdgeMarks(source.data, w, h, 0.4) : []) {
-    const credit = opts.includeOwnership ? null : await looksLikeOwnership(source, m.box, opts.signal)
-    if (credit) {
-      protectedText.push(`“${credit}” (looks like an ownership/attribution mark; never auto-removed)`)
-      continue
-    }
-    regions.push({
-      id: uid(),
-      kind: 'edge',
-      text: `${m.zone} mark`,
-      confidence: Math.round(m.score * 100),
-      category: 'watermark',
-      reason: m.reason,
-      box: m.box,
-      mask: m.mask,
-      angle: 0,
-      selected: false,
-      needsAuth: false,
-      authorized: false,
-    })
-  }
+  // The corner/edge statistics detector (wm/marks.ts `detectEdgeMarks`) is deliberately NOT used here: it cannot tell a logo from a bright part of
+  // the subject, and in Thorough mode it made LaMa repaint a statue's foot, lotus, mace and crown. Corner logos are found by the trained detector.
   const allowed = allowedCategories(opts)
   const gray = toGray(source.data, w, h)
   const looksLikeOverlay = (r: Region): boolean => {
@@ -135,11 +83,12 @@ export async function autoRemoveWatermarks(
   // its surroundings; this rejects OCR noise on photo detail, which would otherwise be rewritten.
   let chosen = regions.map((r) => {
     if (!allowed.has(r.category)) return { ...r, selected: false }
-    if (r.kind === 'edge') return { ...r, selected: true }
     if (r.kind === 'tint') return { ...r, selected: r.confidence >= 40 }
     if (r.kind === 'model') return { ...r, selected: r.confidence >= (opts.thorough ? 25 : 40) }
+    // Rotated OCR reads photo texture as short "words" ("ol", "32", "/ WR"); a diagonal watermark has to read as real text to count.
+    if (r.angle !== 0 && !plausibleText(r)) return { ...r, selected: false }
     const trusted = r.category === 'watermark' || r.category === 'draft' || r.category === 'ownership'
-    const ok = trusted ? r.confidence >= 50 || (r.category !== 'watermark' && r.confidence >= 30) : r.confidence >= 55 && plausibleText(r) && looksLikeOverlay(r)
+    const ok = trusted ?r.confidence >= 50 || (r.category !== 'watermark' && r.confidence >= 30) : r.confidence >= 65 && plausibleText(r) && looksLikeOverlay(r)
     return { ...r, selected: ok }
   })
   if (opts.thorough) {
@@ -151,17 +100,10 @@ export async function autoRemoveWatermarks(
       return overlapY > 0.4 * Math.min(a.box[3] - a.box[1], b.box[3] - b.box[1]) && gap <= 1.5 * Math.max(a.box[3] - a.box[1], b.box[3] - b.box[1])
     }
     const picked = chosen.filter((r) => r.selected)
-    chosen = chosen.map((r) => (!r.selected && allowed.has(r.category) && r.kind === 'ocr' && r.confidence >= 25 && picked.some((p) => near(r, p)) && looksLikeOverlay(r) ? { ...r, selected: true } : r))
+    chosen = chosen.map((r) => (!r.selected && allowed.has(r.category) && r.kind === 'ocr' && r.angle === 0 && r.confidence >= 25 && picked.some((p) => near(r, p)) && looksLikeOverlay(r) ? { ...r, selected: true } : r))
   }
-  if (opts.thorough) {
-    // Tiled / repeated marks: look for more copies of the largest selected regions.
-    const seeds = chosen.filter((r) => r.selected).sort((a, b) => (b.box[2] - b.box[0]) * (b.box[3] - b.box[1]) - (a.box[2] - a.box[0]) * (a.box[3] - a.box[1])).slice(0, 3)
-    for (const seed of seeds) {
-      if (opts.signal?.aborted) throw new Error('Cancelled')
-      const more = await findSimilar(source, seed, chosen)
-      chosen = [...chosen, ...more.filter((r) => r.confidence >= 75 && looksLikeOverlay(r)).map((r) => ({ ...r, selected: true }))]
-    }
-  }
+  // Repeated-mark search (template matching against a detected mark) is intentionally NOT automatic: on textured subjects it matches real
+  // surface detail (statue ropework, fabric) and repaints it. It remains a manual, reviewed action in the Overlays tool ("Find similar marks").
   const skipped = [...protectedText, ...chosen.filter((r) => !r.selected).map(skipReason).filter(Boolean)].slice(0, 8)
   const removed = chosen.filter((r) => r.selected).length
   const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0 }
@@ -169,9 +111,10 @@ export async function autoRemoveWatermarks(
     report.ms = performance.now() - t0
     return { result: null, report }
   }
-  // Large or detector-found marks need contextual filling; Telea only suits small specks.
+  // Large or detector-found marks need contextual filling; Telea only suits small specks. 'auto' also copies real texture (patch fill)
+  // where the surroundings are textured, so a recreated rope/engraving stays sharp instead of being smoothed.
   const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
-  const params = { ...DEFAULT_WM_PARAMS, method: hasLarge ? ('lama' as const) : ('auto' as const), expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
+  const params = { ...DEFAULT_WM_PARAMS, method: 'auto' as const, expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
   const mask = buildMask(chosen, [], w, h, params)
   const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload })
   report.methods = result.methods

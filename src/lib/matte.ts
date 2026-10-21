@@ -21,6 +21,8 @@ export interface RefineParams {
   feather: number
   /** 0..1 background-colour decontamination of edge pixels. */
   decontaminate: number
+  /** 0..1: resolve uncertain (partly transparent) pixels by comparing them with the local backdrop colour. */
+  snap: number
   invert: boolean
 }
 
@@ -35,6 +37,7 @@ export const DEFAULT_PARAMS: RefineParams = {
   smooth: 0,
   feather: 0,
   decontaminate: 0.7,
+  snap: 0.6,
   invert: false,
 }
 
@@ -340,11 +343,13 @@ export interface RefineInput {
   regions?: LabelResult
   /** Region ids the user excluded via the Object tool. */
   excluded?: ReadonlySet<number>
+  /** Source colours (RGBA) at the same resolution; enables backdrop snapping. */
+  rgba?: Uint8ClampedArray
 }
 
 /** Full refinement chain from the raw model matte to the final alpha plane. */
 export function refineMatte(input: RefineInput): Float32Array {
-  const { raw, edits, guide, w, h, params, regions, excluded } = input
+  const { raw, edits, guide, w, h, params, regions, excluded, rgba } = input
   let a = raw
   if (excluded && excluded.size && regions) {
     a = raw.slice()
@@ -357,6 +362,7 @@ export function refineMatte(input: RefineInput): Float32Array {
     a = m
   }
   a = applyLevels(a, params.strength, params.contrast)
+  if (rgba && params.snap > 0) a = snapToBackdrop(a, rgba, w, h, params.snap)
   a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw)
   a = applyEdits(a, edits)
   if (params.shift !== 0) a = morph(a, w, h, params.shift, params.shift > 0)
@@ -368,6 +374,55 @@ export function refineMatte(input: RefineInput): Float32Array {
     a = inv
   }
   return a
+}
+
+/**
+ * Resolves uncertain alpha (0.02..0.98) with real colour evidence. A local backdrop colour is estimated from the pixels the matte is sure
+ * are background (large normalised blur). An uncertain pixel is then:
+ *  - fully opaque if no backdrop is nearby (a "ghost" inside the subject),
+ *  - pushed toward opaque when its colour clearly differs from the backdrop, and toward transparent when it matches it.
+ * Confident pixels are never touched, so the silhouette topology is preserved.
+ */
+export function snapToBackdrop(a: Float32Array, rgba: Uint8ClampedArray, w: number, h: number, strength: number): Float32Array {
+  if (strength <= 0) return a
+  const n = w * h
+  const wBg = new Float32Array(n)
+  let bg = 0
+  let uncertain = 0
+  for (let i = 0; i < n; i++) {
+    if (a[i] < 0.02) {
+      wBg[i] = 1
+      bg++
+    } else if (a[i] <= 0.98) uncertain++
+  }
+  if (!uncertain || bg < n * 0.03) return a // nothing to resolve, or no clear backdrop to compare with
+  const r = Math.max(12, Math.round(Math.min(w, h) * 0.04))
+  const den = boxBlur(boxBlur(wBg, w, h, r), w, h, r)
+  const est: Float32Array[] = []
+  for (let c = 0; c < 3; c++) {
+    const plane = new Float32Array(n)
+    for (let i = 0; i < n; i++) plane[i] = wBg[i] ? rgba[i * 4 + c] : 0
+    est.push(boxBlur(boxBlur(plane, w, h, r), w, h, r))
+  }
+  const LO = 14
+  const HI = 42
+  const out = a.slice()
+  for (let i = 0; i < n; i++) {
+    const v = a[i]
+    if (v < 0.02 || v > 0.98) continue
+    let target: number
+    if (den[i] < 0.04) target = 1
+    else {
+      const inv = 1 / den[i]
+      const dr = rgba[i * 4] - est[0][i] * inv
+      const dg = rgba[i * 4 + 1] - est[1][i] * inv
+      const db = rgba[i * 4 + 2] - est[2][i] * inv
+      const d = Math.sqrt(dr * dr + dg * dg + db * db)
+      target = clamp01((d - LO) / (HI - LO))
+    }
+    out[i] = v + (target - v) * strength
+  }
+  return out
 }
 
 /** Bilinear resample of a float plane (JS, so the probability is not quantised to 8 bits). */

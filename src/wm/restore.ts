@@ -1,5 +1,5 @@
 import { resamplePlane } from '../lib/matte'
-import { blendAlpha, composeResult, pickMethod, SMALL_REGION_PX } from './compose'
+import { blendAlpha, composeResult, PATCH_MAX_AREA, pickMethod, SMALL_REGION_PX } from './compose'
 import { clusterMask, maskArea, resizeMask, ringDetail, toGray, type Box } from './overlay'
 import { LAMA, LamaError, loadLama, runLama } from './lama'
 import { WM_PROFILES, type WmParams } from './types'
@@ -26,6 +26,8 @@ export interface RestoreHooks {
 
 const MAX_LAMA_CLUSTERS = 24
 const LAMA_N = LAMA.size
+/** Source context (px) around a cluster that exemplar patches may be taken from. */
+const PATCH_CONTEXT = 80
 
 function canvasOf(img: ImageData): OffscreenCanvas {
   const c = new OffscreenCanvas(img.width, img.height)
@@ -59,12 +61,34 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
 
   for (const [idx, c] of clusters.entries()) {
     if (hooks.signal?.aborted) throw new Error('Cancelled')
-    let method = pickMethod(params.method, c.box)
+    const clusterArea = boxArea(mask, c.box, w, h)
+    let method = pickMethod(params.method, c.box, params.method === 'auto' ? clusterDetail(gray, mask, c.box, w, h) : 0, clusterArea)
     if (method === 'lama' && lamaCount >= MAX_LAMA_CLUSTERS) {
       method = 'telea'
       if (!warnings.some((x) => x.includes('LaMa was limited'))) warnings.push(`LaMa was limited to ${MAX_LAMA_CLUSTERS} regions; the rest used Telea.`)
     }
-    hooks.onProgress?.(idx, clusters.length, method === 'lama' ? 'Reconstructing with LaMa' : 'Reconstructing with Telea')
+    hooks.onProgress?.(idx, clusters.length, method === 'lama' ? 'Reconstructing with LaMa' : method === 'patch' ? 'Copying real texture' : 'Reconstructing with Telea')
+    if (method === 'patch') {
+      if (clusterArea <= PATCH_MAX_AREA * 2) {
+        // Structure first (LaMa, else Telea), then real texture on top of it.
+        const guide = new Uint8ClampedArray(filled)
+        try {
+          lamaSession ??= await loadLama((l, t) => hooks.onDownload?.(l, t), hooks.signal)
+          await lamaCluster(lamaSession, source, srcCanvas, mask, guide, c.box, profile.context, 0, gray)
+          lamaCount++
+          methods.add('LaMa')
+        } catch (e) {
+          if (hooks.signal?.aborted) throw e
+          if (!(e instanceof LamaError)) throw e
+          warnings.push(`${e.message} The texture fill was guided by Telea instead.`)
+          await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0)
+        }
+        await patchCluster(source, mask, filled, c.box, guide)
+        methods.add('Patch')
+        continue
+      }
+      method = 'lama'
+    }
     if (method === 'lama') {
       try {
         lamaSession ??= await loadLama((l, t) => hooks.onDownload?.(l, t), hooks.signal)
@@ -127,6 +151,56 @@ function matchColour(source: ImageData, mask: Uint8Array, filled: Uint8ClampedAr
       if (!local[y * cw + x]) continue
       const gi = ((y0 + y) * w + x0 + x) * 4
       for (let c = 0; c < 3; c++) filled[gi + c] = Math.min(255, Math.max(0, filled[gi + c] + shift[c]))
+    }
+}
+
+/** Mean local contrast of the unmasked ring around one cluster, measured on a padded crop so it stays cheap on large images. */
+function clusterDetail(gray: Float32Array, mask: Uint8Array, box: Box, w: number, h: number): number {
+  const [x0, y0, x1, y1] = cropBounds(box, 12, w, h)
+  const cw = x1 - x0
+  const ch = y1 - y0
+  const g = new Float32Array(cw * ch)
+  const m = new Uint8Array(cw * ch)
+  for (let y = 0; y < ch; y++)
+    for (let x = 0; x < cw; x++) {
+      g[y * cw + x] = gray[(y0 + y) * w + x0 + x]
+      m[y * cw + x] = mask[(y0 + y) * w + x0 + x]
+    }
+  return ringDetail(g, m, cw, ch)
+}
+
+/** Masked pixels inside a box (one cluster's area, plus any neighbour's pixels that fall in the box). */
+function boxArea(mask: Uint8Array, box: Box, w: number, h: number): number {
+  let n = 0
+  for (let y = Math.max(0, box[1]); y < Math.min(h, box[3]); y++) for (let x = Math.max(0, box[0]); x < Math.min(w, box[2]); x++) n += mask[y * w + x]
+  return n
+}
+
+/** Exemplar fill: copies real texture from the surroundings into the masked pixels, steered by `guide` (see wm/patch.ts). The crop is generous so patches have context all around. */
+async function patchCluster(source: ImageData, mask: Uint8Array, filled: Uint8ClampedArray, box: Box, guide: Uint8ClampedArray): Promise<void> {
+  const { width: w, height: h } = source
+  const [x0, y0, x1, y1] = cropBounds(box, PATCH_CONTEXT, w, h)
+  const cw = x1 - x0
+  const ch = y1 - y0
+  const rgba = new Uint8ClampedArray(cw * ch * 4)
+  const m = new Uint8Array(cw * ch)
+  for (let y = 0; y < ch; y++) {
+    const srcRow = ((y0 + y) * w + x0) * 4
+    rgba.set(source.data.subarray(srcRow, srcRow + cw * 4), y * cw * 4)
+    m.set(mask.subarray((y0 + y) * w + x0, (y0 + y) * w + x1), y * cw)
+  }
+  const keep = m.slice()
+  const g = new Uint8ClampedArray(cw * ch * 4)
+  for (let y = 0; y < ch; y++) g.set(guide.subarray(((y0 + y) * w + x0) * 4, ((y0 + y) * w + x1) * 4), y * cw * 4)
+  const out = await wmClient.patch(rgba, m, cw, ch, g)
+  for (let y = 0; y < ch; y++)
+    for (let x = 0; x < cw; x++) {
+      if (!keep[y * cw + x]) continue
+      const gi = ((y0 + y) * w + x0 + x) * 4
+      const li = (y * cw + x) * 4
+      filled[gi] = out[li]
+      filled[gi + 1] = out[li + 1]
+      filled[gi + 2] = out[li + 2]
     }
 }
 

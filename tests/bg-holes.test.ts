@@ -116,3 +116,70 @@ describe('translucent overlay extraction', () => {
     expect(toGray(new Uint8ClampedArray(4), 1, 1)).toHaveLength(1)
   })
 })
+
+describe('backdrop snap (resolves uncertain alpha with real colour)', () => {
+  const w = 120
+  const h = 90
+  /** Grey studio backdrop with a vertical gradient, and a gold subject disc. */
+  function scene() {
+    const rgba = new Uint8ClampedArray(w * h * 4)
+    const truth = new Float32Array(w * h)
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        const inside = Math.hypot(x - 60, y - 45) < 30
+        truth[i] = inside ? 1 : 0
+        const g = 200 + y * 0.15
+        const o = i * 4
+        if (inside) rgba.set([205, 160, 70, 255], o)
+        else rgba.set([g, g, g + 4, 255], o)
+      }
+    return { rgba, truth }
+  }
+
+  it('makes a ghost (uncertain alpha deep inside the subject) fully opaque', async () => {
+    const { snapToBackdrop } = await import('../src/lib/matte')
+    const { rgba, truth } = scene()
+    const a = Float32Array.from(truth)
+    for (let y = 40; y < 52; y++) for (let x = 55; x < 68; x++) a[y * w + x] = 0.35 // semi-transparent patch inside the statue
+    const out = snapToBackdrop(a, rgba, w, h, 1)
+    expect(out[45 * w + 60]).toBeGreaterThan(0.95)
+  })
+
+  it('pushes subject-coloured fringe to opaque and backdrop-coloured fringe to transparent', async () => {
+    const { snapToBackdrop } = await import('../src/lib/matte')
+    const { rgba, truth } = scene()
+    const a = Float32Array.from(truth)
+    const ring = (x: number, y: number) => Math.abs(Math.hypot(x - 60, y - 45) - 30)
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (ring(x, y) < 2) a[y * w + x] = 0.5
+    const out = snapToBackdrop(a, rgba, w, h, 1)
+    let inside = 0
+    let outside = 0
+    let ni = 0
+    let no = 0
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        if (ring(x, y) < 2) {
+          if (Math.hypot(x - 60, y - 45) < 30) { inside += out[y * w + x]; ni++ } else { outside += out[y * w + x]; no++ }
+        }
+    expect(inside / ni).toBeGreaterThan(0.85) // gold pixels become opaque
+    expect(outside / no).toBeLessThan(0.15) // backdrop-coloured pixels become transparent
+  })
+
+  it('never changes confident pixels and does nothing at strength 0', async () => {
+    const { snapToBackdrop } = await import('../src/lib/matte')
+    const { rgba, truth } = scene()
+    const a = Float32Array.from(truth)
+    a[45 * w + 62] = 0.5
+    const out = snapToBackdrop(a, rgba, w, h, 0.8)
+    for (let i = 0; i < a.length; i++) if (a[i] === 0 || a[i] === 1) expect(out[i]).toBe(a[i])
+    expect(snapToBackdrop(a, rgba, w, h, 0)).toBe(a)
+  })
+
+  it('does nothing when no clear backdrop exists', async () => {
+    const { snapToBackdrop } = await import('../src/lib/matte')
+    const { rgba } = scene()
+    const a = new Float32Array(w * h).fill(0.5)
+    expect(snapToBackdrop(a, rgba, w, h, 1)).toBe(a)
+  })
+})

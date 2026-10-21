@@ -4,9 +4,17 @@ import type { RestoreMethod } from './types'
 
 /** Clusters at or below this size (working px, longest side) are repaired with Telea; larger ones prefer LaMa. */
 export const SMALL_REGION_PX = 40
-/** Method that "auto" picks for a cluster. */
-export function pickMethod(method: RestoreMethod, box: Box): 'telea' | 'lama' {
+/** Mean local contrast (see `ringDetail`) above which the surroundings count as real texture that a smooth fill would blur. */
+export const PATCH_DETAIL = 8
+/** Largest cluster (masked pixels) the exemplar fill takes on; its cost grows with the hole area. */
+export const PATCH_MAX_AREA = 40_000
+/**
+ * Method that "auto" picks for a cluster: textured surroundings get exemplar (patch) filling, which copies real detail; plain
+ * surroundings get Telea for small marks and LaMa for large ones. `detail`/`area` are optional so callers without them keep the size rule.
+ */
+export function pickMethod(method: RestoreMethod, box: Box, detail = 0, area = 0): 'telea' | 'lama' | 'patch' {
   if (method !== 'auto') return method
+  if (detail >= PATCH_DETAIL && area > 0 && area <= PATCH_MAX_AREA) return 'patch'
   return Math.max(box[2] - box[0], box[3] - box[1]) <= SMALL_REGION_PX ? 'telea' : 'lama'
 }
 

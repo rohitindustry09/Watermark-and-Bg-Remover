@@ -157,8 +157,8 @@ export function WmRight() {
   const needsAuthUnconfirmed = item?.regions.filter((r) => r.selected && r.needsAuth && !r.authorized).length ?? 0
   const result = item?.result
   const dl = s.download && s.download.total ? Math.round((s.download.loaded / s.download.total) * 100) : null
-  const lamaOff = p.method === 'telea'
-  const teleaOff = p.method === 'lama'
+  const lamaOff = p.method === 'telea' || p.method === 'patch'
+  const teleaOff = p.method === 'lama' || p.method === 'patch'
 
   return (
     <div className="flex h-full flex-col overflow-y-auto scroll-thin">
@@ -227,13 +227,14 @@ export function WmRight() {
           value={p.method}
           onChange={(method) => set({ method })}
           options={[
-            { value: 'auto', label: 'Automatic (small → Telea, large → LaMa)' },
+            { value: 'auto', label: 'Automatic (texture → Patch, small → Telea, large → LaMa)' },
+            { value: 'patch', label: 'Patch (copies real texture, keeps detail sharp)' },
             { value: 'telea', label: 'Telea (fast, small marks)' },
             { value: 'lama', label: `LaMa (contextual, ${LAMA.sizeMB} MB download)` },
           ]}
         />
         <Slider label="Telea radius" value={p.teleaRadius} min={2} max={12} unit=" px" onChange={(teleaRadius) => set({ teleaRadius })} hint="Telea only: neighbourhood used to estimate each pixel" />
-        {teleaOff && <p className="text-[11px] text-muted">Telea radius is not used by LaMa.</p>}
+        {teleaOff && <p className="text-[11px] text-muted">Telea radius is only used by Telea (and by Automatic for small marks).</p>}
         <Slider label="Edge feather" value={p.feather} min={0} max={12} unit=" px" onChange={(feather) => set({ feather })} hint="Blends the reconstruction into the photo over this distance, inside the mask only" />
         <Slider label="Colour match" value={p.colorMatch} min={0} max={1} step={0.05} onChange={(colorMatch) => set({ colorMatch })} hint="Shifts filled colours toward the mean colour around the region" />
         {lamaOff && <p className="text-[11px] text-muted">LaMa context size comes from the quality profile.</p>}

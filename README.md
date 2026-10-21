@@ -56,7 +56,7 @@ inspect the red mask → *Restore selected* → compare with the split slider �
 | Repeated marks | *Find similar marks* (normalised cross-correlation) and *Reference…* (your own overlay image, 5 scales). Matches are listed for review, unselected. |
 | Manual | Add/Exclude brush, rectangle, lasso (with *Snap to overlay pixels*), click a region, undo/redo, reset. Exclusions always win. |
 | Mask | Expand/contract, hole filling, overlay opacity. Mask is built at working resolution (1600/2560/4096 px by profile). |
-| Inpainting | **Telea** fast-marching (own TypeScript implementation, runs in a worker) for small regions; **LaMa** (big-lama, Apache-2.0, 198 MB, 512 px windows, CPU/WASM) for larger ones; *Automatic* picks per region (≤ 40 px → Telea). |
+| Inpainting | **Telea** fast-marching (own TypeScript implementation, runs in a worker) for small regions; **LaMa** (big-lama, Apache-2.0, 198 MB, 512 px windows, CPU/WASM) for larger ones; **Patch** (exemplar fill, below) copies real texture; *Automatic* picks per region (textured surroundings → Patch, otherwise ≤ 40 px → Telea, larger → LaMa). |
 | Blending | Inward feather (inside the mask only) and optional colour matching to the ring around each region. Both change the output; there are no decorative controls. |
 | Export | Re-applied to the **original-resolution** file: only pixels under the (resampled) mask change. PNG/JPEG/WebP, filename suffix, never overwrites the source. Batch ZIP with `restoration-report.csv`. |
 
@@ -136,11 +136,26 @@ Real-world case: a faint orange/red "Dharma Statuos" watermark across the base o
 - A new **colour detector** (no model download, on by default for watermark removal) handles images dominated by one colour family (brass, silver, wood, a single-colour garment).
   It looks for rare saturated pixels whose hue differs from the image's dominant hue and that cluster into a text-like band, then grows the match along the same text line.
   It stays silent on grey images, colourful images (natural colour is protected), clean images and isolated specks.
-- The corner/edge-mark detector is now **Thorough-only**, with a size limit (marks must be compact). The default pass uses OCR + the colour detector (+ the AI detector if switched on).
+- The corner/edge-mark detector is **no longer part of the automatic pass** at all (it cannot tell a logo from a bright part of the subject), and neither is the automatic
+  "find repeats" search (it matches real surface detail such as ropework and repaints it). Both remain available as manual, reviewed actions.
+- Rotated OCR (Thorough) reads photo texture as short "words" ("ol", "32"). A rotated hit now has to read as real text (≥ 3 letters/digits) to be removed, and unclassified text needs
+  OCR confidence ≥ 65 in Thorough mode.
 
-Measured on that statue photo with default settings: 1 region found and removed (≈43 s, LaMa); only 0.92% of pixels changed, all inside the watermark's own box, and the rest of the image
-is untouched. Before the corner-detector fix the same run rewrote 3.6–7.7% of the image, including parts of the statue.
-The fill is an estimate: the reconstructed ropework on the base is darker and softer than the real surface.
+Measured on that statue photo (990×990) with Thorough + the AI detector: before these fixes 19 regions were repainted, including 7+ patches on the statue's lap, legs and foot (4.4% of the
+image); now 4 regions (the top-left logo and spec text, and the base watermark) and 2.0% of pixels, with the statue itself untouched.
+
+#### Keeping detail sharp: texture-preserving fill
+
+A smooth fill (Telea, or LaMa on repetitive micro-detail such as rope, petals or engraving) looks blurred next to real texture. The **Patch** method (`src/wm/patch.ts`, exemplar
+inpainting after Criminisi et al. 2004) copies real patches from the surrounding image, so the fill keeps real sharpness. Plain exemplar copying alone produced a patchwork (texture
+taken from unrelated places, a broken rim line), so it is **guided**: LaMa (or Telea if LaMa is unavailable) reconstructs the structure first; patch search must agree with it; and only the
+*high-frequency detail* of the copied patches is added on top of the guide's colour and shading. Where the best patch matches poorly, the guide's own detail is used instead, so a bad copy
+degrades to a smooth fill rather than to visible blocks. *Automatic* uses it when the pixels around a region have strong local contrast (≤ 40 000 masked pixels); you can also choose it explicitly.
+
+On synthetic rope texture with a known answer the plain fill reproduced the hidden area with a mean error of 1.5/255 and the same contrast, where Telea lost about two thirds of the contrast.
+On the statue's base the result keeps the rope detail and the rim line instead of a smooth smear. It is still an estimate: it cannot recover detail that was hidden under an opaque watermark, and the exact
+look of the fill varies with the surrounding texture. The full Thorough run on the statue took 78–81 s on the CPU with the guided fill (59 s with the unguided version; 65–86 s before this change
+when it repainted 5–19 regions; single runs each, not averaged).
 
 ### Image enhancer: 4K upscaling and quality boost (both tools)
 

@@ -23,7 +23,7 @@ export interface Region {
   authorized: boolean
 }
 
-export type RestoreMethod = 'auto' | 'telea' | 'lama'
+export type RestoreMethod = 'auto' | 'telea' | 'lama' | 'patch'
 export type RestoreProfile = 'speed' | 'balanced' | 'quality'
 
 export interface WmParams {

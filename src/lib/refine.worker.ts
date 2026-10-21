@@ -57,7 +57,7 @@ ctx.onmessage = (ev: MessageEvent<InMsg>) => {
     } else if (msg.kind === 'compute') {
       if (!source || !raw || !guide || !regions) throw new Error('Worker not initialised')
       const edits = renderEdits(msg.ops, w, h, regions.labels, source.data)
-      const alpha = refineMatte({ raw, edits, guide, w, h, params: msg.params, regions, excluded: new Set(msg.excluded) })
+      const alpha = refineMatte({ raw, edits, guide, w, h, params: msg.params, regions, excluded: new Set(msg.excluded), rgba: source.data })
       const cutout = buildCutout(source, alpha, msg.params.decontaminate)
       ctx.postMessage({ kind: 'compute', id: msg.id, alpha, cutout: cutout.data }, [alpha.buffer, cutout.data.buffer])
     } else if (msg.kind === 'export') {

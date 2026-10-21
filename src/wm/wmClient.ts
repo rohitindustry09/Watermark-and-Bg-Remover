@@ -5,7 +5,7 @@ interface Pending {
   reject: (e: Error) => void
 }
 
-/** One shared worker for Telea inpainting and template matching; calls are queued by the worker itself. */
+/** One shared worker for Telea / patch inpainting and template matching; calls are queued by the worker itself. */
 class WmClient {
   private worker: Worker | null = null
   private seq = 0
@@ -42,6 +42,11 @@ class WmClient {
 
   async telea(rgba: Uint8ClampedArray, mask: Uint8Array, w: number, h: number, radius: number): Promise<Uint8ClampedArray> {
     const r = await this.call<{ rgba: Uint8ClampedArray }>({ kind: 'telea', rgba, mask, w, h, radius }, [rgba.buffer, mask.buffer])
+    return r.rgba
+  }
+
+  async patch(rgba: Uint8ClampedArray, mask: Uint8Array, w: number, h: number, guide?: Uint8ClampedArray): Promise<Uint8ClampedArray> {
+    const r = await this.call<{ rgba: Uint8ClampedArray }>({ kind: 'patch', rgba, mask, w, h, guide }, guide ? [rgba.buffer, mask.buffer, guide.buffer] : [rgba.buffer, mask.buffer])
     return r.rgba
   }
 
