@@ -128,6 +128,20 @@ Honest limits: thorough mode with LaMa is slow on the CPU (tens of seconds to mi
 the detector can miss stylised marks or flag non-marks, so always review the result; the fast MODNet portrait model fragments some subjects (use RMBG-1.4 for personal use or
 BiRefNet-lite on a working WebGPU device for better cutouts).
 
+#### Coloured (tinted) watermarks on product photos
+
+Real-world case: a faint orange/red "Dharma Statuos" watermark across the base of a brass statue. OCR read only garbage from the statue's relief, the trained detector found nothing
+(it was not a brightness overlay), and the corner-mark detector mistook the statue's own bright finials, mace and foot for logos and would have inpainted them. So:
+
+- A new **colour detector** (no model download, on by default for watermark removal) handles images dominated by one colour family (brass, silver, wood, a single-colour garment).
+  It looks for rare saturated pixels whose hue differs from the image's dominant hue and that cluster into a text-like band, then grows the match along the same text line.
+  It stays silent on grey images, colourful images (natural colour is protected), clean images and isolated specks.
+- The corner/edge-mark detector is now **Thorough-only**, with a size limit (marks must be compact). The default pass uses OCR + the colour detector (+ the AI detector if switched on).
+
+Measured on that statue photo with default settings: 1 region found and removed (≈43 s, LaMa); only 0.92% of pixels changed, all inside the watermark's own box, and the rest of the image
+is untouched. Before the corner-detector fix the same run rewrote 3.6–7.7% of the image, including parts of the statue.
+The fill is an estimate: the reconstructed ropework on the base is darker and softer than the real surface.
+
 ### Limits you should know about
 
 - **OCR is weak on faint overlays.** On the 42–55% opacity test it misread "SAMPLE" and found nothing usable; it reads clean, high-contrast text well

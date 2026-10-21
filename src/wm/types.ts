@@ -1,7 +1,7 @@
 import type { Box, Category } from './overlay'
 import type { History } from '../lib/ops'
 
-export type DetectKind = 'ocr' | 'pattern' | 'reference' | 'manual' | 'edge' | 'model'
+export type DetectKind = 'ocr' | 'pattern' | 'reference' | 'manual' | 'edge' | 'model' | 'tint'
 
 export interface Region {
   id: string

@@ -1,4 +1,4 @@
-import { detectText, detectWithModel, findSimilar } from './detect'
+import { detectText, detectTint, detectWithModel, findSimilar } from './detect'
 import { recognizeLines } from './ocr'
 import { classifyText } from './overlay'
 import { detectEdgeMarks, toneConsistency } from './marks'
@@ -96,8 +96,11 @@ export async function autoRemoveWatermarks(
       detectorWarning = `The AI watermark detector could not run (${e instanceof Error ? e.message : String(e)}).`
     }
   }
+  regions.push(...detectTint(source))
   const protectedText: string[] = []
-  for (const m of detectEdgeMarks(source.data, w, h, opts.thorough ? 0.4 : 0.55)) {
+  // Corner/edge mark statistics cannot tell a logo from a bright part of the scene that touches the frame (a metal finial, a lamp),
+  // so they are only used in Thorough mode; the default pass relies on OCR, the colour detector and (optionally) the trained detector.
+  for (const m of opts.thorough ? detectEdgeMarks(source.data, w, h, 0.4) : []) {
     const credit = opts.includeOwnership ? null : await looksLikeOwnership(source, m.box, opts.signal)
     if (credit) {
       protectedText.push(`“${credit}” (looks like an ownership/attribution mark; never auto-removed)`)
@@ -133,6 +136,7 @@ export async function autoRemoveWatermarks(
   let chosen = regions.map((r) => {
     if (!allowed.has(r.category)) return { ...r, selected: false }
     if (r.kind === 'edge') return { ...r, selected: true }
+    if (r.kind === 'tint') return { ...r, selected: r.confidence >= 40 }
     if (r.kind === 'model') return { ...r, selected: r.confidence >= (opts.thorough ? 25 : 40) }
     const trusted = r.category === 'watermark' || r.category === 'draft' || r.category === 'ownership'
     const ok = trusted ? r.confidence >= 50 || (r.category !== 'watermark' && r.confidence >= 30) : r.confidence >= 55 && plausibleText(r) && looksLikeOverlay(r)
@@ -166,7 +170,7 @@ export async function autoRemoveWatermarks(
     return { result: null, report }
   }
   // Large or detector-found marks need contextual filling; Telea only suits small specks.
-  const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
+  const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
   const params = { ...DEFAULT_WM_PARAMS, method: hasLarge ? ('lama' as const) : ('auto' as const), expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
   const mask = buildMask(chosen, [], w, h, params)
   const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload })

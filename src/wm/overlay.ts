@@ -469,3 +469,25 @@ export function segmentVeil(gray: Float32Array, w: number, h: number, box: Box, 
   for (let i = 0; i < solid.length; i++) if (!inShape[i]) solid[i] = 0
   return { box: r, mask: solid, coverage, fallback: false, contrast: sum / Math.max(1, count) / 255, polarity: best.p }
 }
+
+/** Bounding boxes of the 4-connected foreground components of a binary mask (largest first). */
+export function labelBoxes(m: Uint8Array, w: number, h: number): { box: Box; area: number }[] {
+  const reg = labelRegions(toPlane(m), w, h)
+  const boxes = new Map<number, { box: Box; area: number }>()
+  for (let i = 0; i < m.length; i++) {
+    if (!m[i]) continue
+    const id = reg.labels[i]
+    const x = i % w
+    const y = (i - x) / w
+    const e = boxes.get(id)
+    if (!e) boxes.set(id, { box: [x, y, x + 1, y + 1], area: 1 })
+    else {
+      if (x < e.box[0]) e.box[0] = x
+      if (y < e.box[1]) e.box[1] = y
+      if (x + 1 > e.box[2]) e.box[2] = x + 1
+      if (y + 1 > e.box[3]) e.box[3] = y + 1
+      e.area++
+    }
+  }
+  return [...boxes.values()].sort((a, b) => b.area - a.area)
+}

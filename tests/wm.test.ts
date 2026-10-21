@@ -320,3 +320,16 @@ describe('tone consistency (filters OCR noise from real overlays)', () => {
     expect(bad.sign).toBeLessThan(0.7)
   })
 })
+
+describe('edge marks reject large scene highlights', () => {
+  it('does not report a big bright area at the top edge as a logo', async () => {
+    const { detectEdgeMarks } = await import('../src/wm/marks')
+    const w = 400
+    const h = 300
+    const d = new Uint8ClampedArray(w * h * 4)
+    for (let i = 0; i < w * h; i++) d.set([60 + ((i * 7) % 20), 62, 66, 255], i * 4)
+    // a large, bright, low-saturation object touching the top edge (like a metal finial)
+    for (let y = 0; y < 90; y++) for (let x = 120; x < 300; x++) if ((x * 3 + y * 5) % 7 < 5) d.set([210, 205, 195, 255], (y * w + x) * 4)
+    expect(detectEdgeMarks(d, w, h)).toEqual([])
+  })
+})

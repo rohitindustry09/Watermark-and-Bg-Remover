@@ -6,7 +6,7 @@ import { buildZip, csvReport, extractImages } from '../lib/zip'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type Region, type WmItem, type WmParams, type WmStatus } from './types'
 import { buildMask, regionActive } from './mask'
 import { composeFullResolution, composeResult, restoreImage, type RestoreResult } from './restore'
-import { detectText, detectWithModel, findByReference, findSimilar } from './detect'
+import { detectText, detectTint, detectWithModel, findByReference, findSimilar } from './detect'
 import { wmClient } from './wmClient'
 import { maskArea, segmentOverlay, toGray, clampBox } from './overlay'
 import { pointInPoly } from './detect'
@@ -116,7 +116,8 @@ export const useWm = create<WmState>((set, get) => {
       if (get().autoDetect) {
         const regions = await detectText(source, { rotated: get().rotatedScan, signal, onProgress: (d, t) => set({ progress: { label: `Reading text in ${it.name}`, done: d, total: t } }) })
         set({ progress: null })
-        patch(id, { regions, status: 'ready', detectNote: regions.length ? undefined : 'No readable text found. Use the manual selection tools, or “Find similar” / a reference image for logos.' })
+        const withTint = [...detectTint(source), ...regions]
+        patch(id, { regions: withTint, status: 'ready', detectNote: withTint.length ? undefined : 'No readable text found. Use the manual selection tools, or “Find similar” / a reference image for logos.' })
       }
       if (!get().activeId) await get().openItem(id)
     } catch (e) {
@@ -270,7 +271,7 @@ export const useWm = create<WmState>((set, get) => {
         patch(it.id, { status: 'detecting' })
         const regions = await detectText(session.source, { rotated: get().rotatedScan, signal: abort.signal, onProgress: (d, t) => set({ progress: { label: 'Reading text', done: d, total: t } }) })
         set({ progress: null })
-        patch(it.id, { regions, status: 'ready', detectNote: regions.length ? undefined : 'No readable text found.' })
+        patch(it.id, { regions: [...detectTint(session.source), ...regions], status: 'ready', detectNote: regions.length ? undefined : 'No readable text found.' })
         refreshMask()
       } catch (e) {
         set({ progress: null, notice: `Detection failed: ${msg(e)}` })

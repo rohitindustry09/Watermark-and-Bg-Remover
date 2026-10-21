@@ -1,5 +1,6 @@
 import { classifyText, clampBox, downscaleGray, segmentOverlay, segmentVeil, toGray, type Box } from './overlay'
 import { detectWatermarkBoxes } from './detector'
+import { detectTintMarks } from './marks'
 import { recognizeLines, type OcrLine } from './ocr'
 import { wmClient } from './wmClient'
 import type { Region } from './types'
@@ -188,4 +189,22 @@ export async function detectWithModel(
       authorized: false,
     }
   })
+}
+
+/** Coloured (tinted) watermark candidates in single-hue-family images. Pure pixel analysis, no model download. */
+export function detectTint(source: ImageData): Region[] {
+  return detectTintMarks(source.data, source.width, source.height).map((t) => ({
+    id: uid(),
+    kind: 'tint' as const,
+    text: 'coloured watermark',
+    confidence: Math.round(t.score * 100),
+    category: 'watermark' as const,
+    reason: t.reason,
+    box: t.box,
+    mask: t.mask,
+    angle: 0,
+    selected: false,
+    needsAuth: false,
+    authorized: false,
+  }))
 }
