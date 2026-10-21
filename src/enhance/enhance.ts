@@ -1,4 +1,4 @@
-import { autoTone, bleedColours, denoise, unsharp } from './classical'
+import { autoTone, bleedBanded, denoiseBanded, unsharpBanded } from './classical'
 import { SR_MODEL, loadSr, srTile } from './sr'
 import { extractTile, planEnhance, planTiles, type EnhancePlan, type EnhanceTarget } from './tiles'
 
@@ -27,7 +27,11 @@ export interface EnhanceResult {
 type AnyCanvas = OffscreenCanvas | HTMLCanvasElement
 
 function newCanvas(w: number, h: number): OffscreenCanvas {
-  return new OffscreenCanvas(w, h)
+  const c = new OffscreenCanvas(w, h)
+  // Request a CPU-backed context up front: these canvases are read back constantly, and GPU-backed ones can stall or drop
+  // their contents under memory pressure, which showed up as blank exports.
+  c.getContext('2d', { willReadFrequently: true })
+  return c
 }
 
 /** Resizes with the browser's high-quality resampler. */
@@ -82,7 +86,7 @@ async function upscaleAi(src: Uint8ClampedArray, w: number, h: number, outW: num
  * Enhances a composed image: optional denoise → auto tone → upscale (AI tiles or classical) → sharpen, preserving alpha.
  * Never touches the geometry of the picture; only resolution and local contrast change.
  */
-export async function enhanceCanvas(source: AnyCanvas, opts: EnhanceOptions): Promise<EnhanceResult> {
+async function enhanceCanvasUnsafe(source: AnyCanvas, opts: EnhanceOptions): Promise<EnhanceResult> {
   const t0 = performance.now()
   const w = source.width
   const h = source.height
@@ -100,8 +104,8 @@ export async function enhanceCanvas(source: AnyCanvas, opts: EnhanceOptions): Pr
   for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3]
 
   opts.onProgress?.(0, 1, 'Preparing')
-  if (hasAlpha) rgba = bleedColours(rgba, w, h)
-  if (opts.denoise > 0) rgba = denoise(rgba, w, h, opts.denoise)
+  if (hasAlpha) rgba = bleedBanded(rgba, w, h)
+  if (opts.denoise > 0) rgba = denoiseBanded(rgba, w, h, opts.denoise)
   if (opts.autoTone) rgba = autoTone(rgba, 0.8).data
 
   // Opaque RGB working copy for resampling.
@@ -142,13 +146,47 @@ export async function enhanceCanvas(source: AnyCanvas, opts: EnhanceOptions): Pr
   if (opts.sharpen > 0) {
     opts.onProgress?.(0, 1, 'Sharpening')
     // Radius grows with the upscale factor so the sharpened detail has the same visual size.
-    out = unsharp(out, ow, oh, opts.sharpen, 0.8 + plan.scale * 0.35, 3)
+    out = unsharpBanded(out, ow, oh, opts.sharpen, 0.8 + plan.scale * 0.35, 3)
   }
   if (hasAlpha) {
-    const a = resize(toCanvas(Uint8ClampedArray.from({ length: w * h * 4 }, (_, i) => (i % 4 === 3 ? 255 : alpha[(i - (i % 4)) / 4])), w, h), ow, oh)
+    const grey = new Uint8ClampedArray(w * h * 4)
+    for (let i = 0; i < alpha.length; i++) {
+      grey[i * 4] = alpha[i]
+      grey[i * 4 + 1] = alpha[i]
+      grey[i * 4 + 2] = alpha[i]
+      grey[i * 4 + 3] = 255
+    }
+    const a = resize(toCanvas(grey, w, h), ow, oh)
     const ad = a.getContext('2d')!.getImageData(0, 0, ow, oh).data
     for (let i = 0; i < ow * oh; i++) out[i * 4 + 3] = ad[i * 4]
   }
   const result = toCanvas(out, ow, oh)
   return { canvas: result, plan, notes, ms: performance.now() - t0 }
+}
+
+export const isOutOfMemory = (e: unknown): boolean => e instanceof RangeError || /memory|allocation|out of range|invalid array length/i.test(e instanceof Error ? e.message : String(e))
+
+/**
+ * Same as above, but an out-of-memory failure never loses the export: it retries with only the cheap steps and, as a last resort,
+ * returns the image unenhanced together with a clear explanation.
+ */
+export async function enhanceCanvas(source: AnyCanvas, opts: EnhanceOptions): Promise<EnhanceResult> {
+  try {
+    return await enhanceCanvasUnsafe(source, opts)
+  } catch (e) {
+    if (opts.signal?.aborted || !isOutOfMemory(e)) throw e
+  }
+  try {
+    const r = await enhanceCanvasUnsafe(source, { ...opts, denoise: 0, autoTone: false, sharpen: Math.min(opts.sharpen, 0.25), ai: 'off' })
+    return { ...r, notes: [...r.notes, 'The browser ran low on memory, so denoise, auto tone and AI upscaling were skipped for this image. Try 2K, a smaller image, or close other tabs.'] }
+  } catch (e) {
+    if (opts.signal?.aborted || !isOutOfMemory(e)) throw e
+  }
+  const plan = planEnhance(source.width, source.height, 'original', 'off', SR_MODEL.tile, SR_MODEL.margin)
+  return {
+    canvas: source as OffscreenCanvas,
+    plan,
+    notes: ['Not enough memory to enhance this image at this size, so it was exported without enhancement. Try a smaller size (2K or Keep size), the Speed profile, or close other tabs.'],
+    ms: 0,
+  }
 }

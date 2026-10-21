@@ -17,7 +17,7 @@ import { emptyHistory, pushOp, redo as redoH, undo as undoH, type History, type 
 import { ExportError, downloadBlob, encodeCanvas, exportFilename, validateExport, type AlphaCheck, type ExportFormat } from '../lib/exporter'
 import { buildZip, csvReport, extractImages } from '../lib/zip'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
-import { applyEnhance } from '../enhance/apply'
+import { applyEnhance, canvasStats, cancelEnhance } from '../enhance/apply'
 import { composeFullResolution, composeResult } from '../wm/restore'
 import {
   canvasFrom,
@@ -143,7 +143,17 @@ export const getSession = (): Session | null => session
 
 const uid = () => crypto.randomUUID()
 
+const OOM = /out of memory|allocation failed|invalid array length|array buffer allocation|RangeError/i
+
 function messageOf(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  if (e instanceof RangeError || OOM.test(raw)) {
+    return 'The browser ran out of memory. Try the Speed profile, a smaller image, a lower export size (2K or Keep size), turn off Thorough / Enhance, or close other tabs and retry.'
+  }
+  return messageOfInner(e)
+}
+
+function messageOfInner(e: unknown): string {
   if (e instanceof DecodeError || e instanceof EngineError || e instanceof ExportError) return e.message
   if (e instanceof Error) return e.message
   return String(e)
@@ -321,6 +331,11 @@ export const useStudio = create<Studio>((set, get) => {
       const bg: BackgroundSpec = format === 'jpeg' && st.bg.kind === 'transparent' ? { ...st.bg, kind: 'color', color: '#ffffff' } : st.bg
       const target = new OffscreenCanvas(1, 1)
       renderComposite({ target, cutout, original, bounds, bg, shadow: st.shadow, layout: st.layout })
+      // Never save a blank picture: the composite of a subject with real coverage must contain content.
+      const composed = canvasStats(target)
+      if (s.coverage > 1 && composed.std < 1 && composed.meanAlpha < 8) {
+        throw new ExportError('The image came out blank (fully transparent) even though a subject was detected. Reprocess the image, then export again.', 'empty-mask')
+      }
       const finalCanvas = await applyEnhance(target)
       const blob = await encodeCanvas(finalCanvas, format, quality)
       const expectTransparent = bg.kind === 'transparent'
@@ -538,6 +553,7 @@ export const useStudio = create<Studio>((set, get) => {
       void pump()
     },
     cancelAll() {
+      cancelEnhance()
       abort.abort()
       abort = new AbortController()
       set((s) => ({ items: s.items.map((i) => (i.status === 'queued' ? { ...i, status: 'cancelled' as Status } : i)) }))

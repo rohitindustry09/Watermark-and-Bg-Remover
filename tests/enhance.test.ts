@@ -136,3 +136,70 @@ describe('classical enhancement', () => {
     expect(Array.from(out.slice(0, 4))).toEqual([200, 40, 40, 255])
   })
 })
+
+describe('banded processing keeps results identical while bounding memory', () => {
+  const noisy = (w: number, h: number) => rgba(w, h, (x, y) => {
+    const n = (((x * 73856093) ^ (y * 19349663)) >>> 0) % 31 - 15
+    const b = 90 + Math.floor((x / w) * 100) + (y > h / 2 ? 30 : 0)
+    return [b + n, b + n / 2, b - n, 255]
+  })
+
+  it('denoise in small bands matches the whole-image result', async () => {
+    const { denoise: d, denoiseBanded, bandProcess } = await import('../src/enhance/classical')
+    const w = 90
+    const h = 260
+    const img = noisy(w, h)
+    const whole = d(img, w, h, 0.6)
+    const banded = bandProcess(img, w, h, Math.round(1 + 0.6 * 2) * 2 + 4, (b, bw, bh) => d(b, bw, bh, 0.6), 90 * 70)
+    let maxDiff = 0
+    for (let i = 0; i < whole.length; i++) maxDiff = Math.max(maxDiff, Math.abs(whole[i] - banded[i]))
+    expect(maxDiff).toBeLessThanOrEqual(1)
+    expect(denoiseBanded(img, w, h, 0)).toBe(img)
+  })
+
+  it('unsharp in small bands matches the whole-image result', async () => {
+    const { unsharp: u, bandProcess } = await import('../src/enhance/classical')
+    const w = 90
+    const h = 260
+    const img = noisy(w, h)
+    const whole = u(img, w, h, 0.5, 1.6, 2)
+    const banded = bandProcess(img, w, h, Math.ceil(1.6 * 4) + 4, (b, bw, bh) => u(b, bw, bh, 0.5, 1.6, 2), 90 * 70)
+    let maxDiff = 0
+    for (let i = 0; i < whole.length; i++) maxDiff = Math.max(maxDiff, Math.abs(whole[i] - banded[i]))
+    expect(maxDiff).toBeLessThanOrEqual(1)
+  })
+
+  it('treats small images as a single band', async () => {
+    const { bandProcess } = await import('../src/enhance/classical')
+    let calls = 0
+    const img = noisy(40, 40)
+    bandProcess(img, 40, 40, 6, (b) => { calls++; return b })
+    expect(calls).toBe(1)
+  })
+})
+
+describe('out-of-memory detection', () => {
+  it('recognises allocation failures', async () => {
+    const { isOutOfMemory } = await import('../src/enhance/enhance')
+    expect(isOutOfMemory(new RangeError('Array buffer allocation failed'))).toBe(true)
+    expect(isOutOfMemory(new Error('Out of memory'))).toBe(true)
+    expect(isOutOfMemory(new Error('Cancelled'))).toBe(false)
+  })
+})
+
+describe('blank-image guard', () => {
+  it('flags a result that lost the picture and accepts a normal one', async () => {
+    const { lostContent } = await import('../src/enhance/apply')
+    const real = { meanAlpha: 255, std: 54, meanLuma: 150 }
+    expect(lostContent(real, { meanAlpha: 255, std: 52, meanLuma: 149 })).toBe(false) // normal enhancement
+    expect(lostContent(real, { meanAlpha: 255, std: 0, meanLuma: 253 })).toBe(true) // flattened to one near-white colour
+    expect(lostContent(real, { meanAlpha: 0, std: 0, meanLuma: 0 })).toBe(true) // fully transparent
+    expect(lostContent(real, { meanAlpha: 20, std: 50, meanLuma: 150 })).toBe(true) // alpha collapsed
+  })
+
+  it('does not flag an input that was already blank or very flat', async () => {
+    const { lostContent } = await import('../src/enhance/apply')
+    expect(lostContent({ meanAlpha: 255, std: 0, meanLuma: 255 }, { meanAlpha: 255, std: 0, meanLuma: 255 })).toBe(false)
+    expect(lostContent({ meanAlpha: 255, std: 2, meanLuma: 255 }, { meanAlpha: 255, std: 0.1, meanLuma: 255 })).toBe(false)
+  })
+})

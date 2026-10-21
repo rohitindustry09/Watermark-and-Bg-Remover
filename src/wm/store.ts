@@ -32,7 +32,13 @@ let abort = new AbortController()
 let pumping = false
 
 const uid = () => crypto.randomUUID()
-const msg = (e: unknown) => (e instanceof Error ? e.message : String(e))
+const msg = (e: unknown): string => {
+  const raw = e instanceof Error ? e.message : String(e)
+  if (e instanceof RangeError || /out of memory|allocation failed|invalid array length|array buffer allocation/i.test(raw)) {
+    return 'The browser ran out of memory. Try the Fast profile, a smaller image, a lower export size, or close other tabs and retry.'
+  }
+  return raw
+}
 const mapItem = (items: WmItem[], id: string, fn: (i: WmItem) => WmItem) => items.map((i) => (i.id === id ? fn(i) : i))
 
 interface WmState {

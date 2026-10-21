@@ -1,4 +1,5 @@
 import { useEnhance } from '../enhance/store'
+import { cancelEnhance } from '../enhance/apply'
 import { planEnhance, TARGET_EDGE, type EnhanceTarget } from '../enhance/tiles'
 import { SR_MODEL } from '../enhance/sr'
 import { Section, Segmented, Slider, Toggle } from './ui'
@@ -52,6 +53,14 @@ export function EnhancePanel({ width, height }: { width?: number; height?: numbe
             <p className="text-[11.5px] text-muted" role="status">
               {e.progress.label}
               {e.progress.total > 1 ? ` ${Math.min(e.progress.total, e.progress.done)}/${e.progress.total}` : '…'}
+              <button type="button" onClick={cancelEnhance} className="ml-2 rounded border border-line px-1.5 py-0.5 text-danger hover:bg-raised">
+                Cancel
+              </button>
+            </p>
+          )}
+          {e.lastNote && (
+            <p className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11.5px] text-warn" role="status">
+              {e.lastNote}
             </p>
           )}
           <p className="text-[11px] leading-snug text-muted">

@@ -173,6 +173,23 @@ Honest limits: AI upscaling **invents** plausible detail, it does not recover lo
 network on the test machine, so it runs on the CPU; big sources mean many tiles (a 2400×2400 image is ~530 tiles, roughly 10 minutes), which is why Auto falls back to classic there.
 Large 4K PNGs are tens of MB; use WebP/JPEG for smaller files.
 
+#### Memory use and "out of memory" errors
+
+Browsers cap a tab's memory (about 2.8 GB of JavaScript heap on the test machine). The enhancer therefore runs denoise, sharpen and edge-colour bleed in **bands** (about 1.5 megapixels each,
+with overlap so the result matches a whole-image pass to within 1 level), which keeps peak memory independent of image size: a 24-megapixel image takes 26 s and an **81-megapixel image completes in 112 s**.
+If memory still runs out, the export is not lost: the enhancer retries with only the cheap steps (no denoise, auto tone or AI), and as a last resort exports the image unenhanced with an explanation.
+Out-of-memory failures anywhere else (segmentation, LaMa, full-size decode) are reported as a plain message with what to try: the Speed/Fast profile, a smaller image or export size,
+turning off Thorough/Enhance, or closing other tabs. I did not capture an exact peak-heap figure (the page was too busy to sample it), so treat these numbers as "completed without failing" rather than a measured ceiling.
+
+#### Responsiveness and blank-image protection
+
+Enhancement runs in a **Web Worker**, so the page no longer freezes while it works (measured on a 2000×2000 → 3840×3840 classic enhance: the longest main-thread freeze fell from **7.9 s to 0.17 s**;
+a production-build export through the real Download button with AI upscaling froze the page for at most 0.11 s). Progress and a **Cancel** button show in the panel.
+Intermediate canvases are CPU-backed, which avoids the GPU read-back stalls and the silent loss of canvas contents that can happen under memory pressure.
+Before an enhanced image replaces the export it is compared with the input (alpha and detail); if the result came back **blank, fully transparent or flattened to one colour**, it is discarded,
+the unenhanced image is exported instead, and the panel says why. The background tool also refuses to save a composite that is fully transparent while a subject was detected.
+If the worker cannot start, enhancement falls back to the main thread (slower, still correct).
+
 ### Limits you should know about
 
 - **OCR is weak on faint overlays.** On the 42–55% opacity test it misread "SAMPLE" and found nothing usable; it reads clean, high-contrast text well

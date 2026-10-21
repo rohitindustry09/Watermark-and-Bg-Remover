@@ -114,3 +114,42 @@ export function bleedColours(rgba: Uint8ClampedArray, w: number, h: number): Uin
   }
   return out
 }
+
+/** Aim for roughly this many pixels per band so transient float buffers stay in the tens of MB regardless of image size. */
+const BAND_PIXELS = 1_500_000
+
+/**
+ * Applies a local, neighbourhood-based filter to horizontal bands (each with `overlap` extra rows of context) and stitches the
+ * results. Peak memory is a function of the band size, not the image size, so 24+ megapixel images cannot exhaust the tab.
+ * `fn` must only look at pixels within `overlap` rows/columns of the pixel it computes.
+ */
+export function bandProcess(
+  rgba: Uint8ClampedArray,
+  w: number,
+  h: number,
+  overlap: number,
+  fn: (band: Uint8ClampedArray, bw: number, bh: number) => Uint8ClampedArray,
+  bandPixels = BAND_PIXELS,
+): Uint8ClampedArray {
+  const rows = Math.max(overlap * 4, 64, Math.floor(bandPixels / w))
+  if (rows >= h) return fn(rgba, w, h)
+  const out = new Uint8ClampedArray(rgba.length)
+  for (let y0 = 0; y0 < h; y0 += rows) {
+    const y1 = Math.min(h, y0 + rows)
+    const a = Math.max(0, y0 - overlap)
+    const b = Math.min(h, y1 + overlap)
+    const band = rgba.slice(a * w * 4, b * w * 4)
+    const res = fn(band, w, b - a)
+    out.set(res.subarray((y0 - a) * w * 4, (y1 - a) * w * 4), y0 * w * 4)
+  }
+  return out
+}
+
+export const denoiseBanded = (rgba: Uint8ClampedArray, w: number, h: number, strength: number): Uint8ClampedArray =>
+  strength <= 0 ? rgba : bandProcess(rgba, w, h, Math.round(1 + strength * 2) * 2 + 4, (b, bw, bh) => denoise(b, bw, bh, strength))
+
+export const unsharpBanded = (rgba: Uint8ClampedArray, w: number, h: number, amount: number, radius: number, threshold = 2): Uint8ClampedArray =>
+  amount <= 0 ? rgba : bandProcess(rgba, w, h, Math.ceil(Math.max(0.8, radius) * 4) + 4, (b, bw, bh) => unsharp(b, bw, bh, amount, radius, threshold))
+
+export const bleedBanded = (rgba: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray =>
+  bandProcess(rgba, w, h, Math.max(3, Math.round(Math.max(w, h) / 300)) * 4 + 4, (b, bw, bh) => bleedColours(b, bw, bh))
