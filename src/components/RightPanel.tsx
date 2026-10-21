@@ -4,6 +4,7 @@ import { CANVAS_PRESETS, type BgKind, type FitMode } from '../lib/composite'
 import { DEFAULT_PARAMS, type RefineParams } from '../lib/matte'
 import { FORMAT_INFO, type ExportFormat } from '../lib/exporter'
 import { Btn, ColorField, Section, Segmented, Select, Slider, Toggle } from './ui'
+import { EnhancePanel } from './EnhancePanel'
 
 const SWATCHES = ['#ffffff', '#000000', '#f3f4f6', '#e8dcc8', '#dbeafe', '#fde68a']
 
@@ -227,6 +228,8 @@ export function RightPanel() {
         <Slider label="Horizontal offset" value={s.layout.offsetX} min={-0.5} max={0.5} step={0.01} onChange={(offsetX) => s.setLayout({ offsetX })} onReset={() => s.setLayout({ offsetX: 0 })} />
         <Slider label="Vertical offset" value={s.layout.offsetY} min={-0.5} max={0.5} step={0.01} onChange={(offsetY) => s.setLayout({ offsetY })} onReset={() => s.setLayout({ offsetY: 0 })} />
       </Section>
+
+      <EnhancePanel width={item?.info?.width} height={item?.info?.height} />
 
       <Section title="Export">
         <Segmented<ExportFormat>

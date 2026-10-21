@@ -9,6 +9,7 @@ import { composeFullResolution, composeResult, restoreImage, type RestoreResult 
 import { detectText, detectTint, detectWithModel, findByReference, findSimilar } from './detect'
 import { wmClient } from './wmClient'
 import { maskArea, segmentOverlay, toGray, clampBox } from './overlay'
+import { applyEnhance } from '../enhance/apply'
 import { pointInPoly } from './detect'
 
 export type WmTool = 'pan' | 'select' | 'add' | 'exclude' | 'rect' | 'lasso'
@@ -170,7 +171,7 @@ export const useWm = create<WmState>((set, get) => {
     const finalImg = composeFullResolution(original, s.source, s.result)
     const canvas = new OffscreenCanvas(finalImg.width, finalImg.height)
     canvas.getContext('2d')!.putImageData(finalImg, 0, 0)
-    const blob = await encodeCanvas(canvas, st.exportFormat, st.exportQuality)
+    const blob = await encodeCanvas(await applyEnhance(canvas), st.exportFormat, st.exportQuality)
     if (!own && session?.id !== id) {
       /* temp session is just garbage-collected */
     }

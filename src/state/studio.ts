@@ -17,6 +17,7 @@ import { emptyHistory, pushOp, redo as redoH, undo as undoH, type History, type 
 import { ExportError, downloadBlob, encodeCanvas, exportFilename, validateExport, type AlphaCheck, type ExportFormat } from '../lib/exporter'
 import { buildZip, csvReport, extractImages } from '../lib/zip'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
+import { applyEnhance } from '../enhance/apply'
 import { composeFullResolution, composeResult } from '../wm/restore'
 import {
   canvasFrom,
@@ -320,7 +321,8 @@ export const useStudio = create<Studio>((set, get) => {
       const bg: BackgroundSpec = format === 'jpeg' && st.bg.kind === 'transparent' ? { ...st.bg, kind: 'color', color: '#ffffff' } : st.bg
       const target = new OffscreenCanvas(1, 1)
       renderComposite({ target, cutout, original, bounds, bg, shadow: st.shadow, layout: st.layout })
-      const blob = await encodeCanvas(target, format, quality)
+      const finalCanvas = await applyEnhance(target)
+      const blob = await encodeCanvas(finalCanvas, format, quality)
       const expectTransparent = bg.kind === 'transparent'
       const check = await validateExport(blob, format, expectTransparent)
       if (!check.ok) throw new ExportError(check.detail, 'alpha-lost')

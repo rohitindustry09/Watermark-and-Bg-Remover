@@ -142,6 +142,37 @@ Measured on that statue photo with default settings: 1 region found and removed 
 is untouched. Before the corner-detector fix the same run rewrote 3.6–7.7% of the image, including parts of the statue.
 The fill is an estimate: the reconstructed ropework on the base is darker and softer than the real surface.
 
+### Image enhancer: 4K upscaling and quality boost (both tools)
+
+The **Enhance & upscale (4K)** panel (right side, above Export; **off by default**) improves the final, recreated image **when you export it**, so what you get is the clean image
+(watermark removed, background applied) at the chosen size. It never changes the picture's geometry.
+
+| Setting | What it does |
+|---|---|
+| Resolution | Keep size · 2K (long edge 2560) · 4K (long edge 3840). Images already large enough are not upscaled; a note says so. |
+| Upscaling method | **Classic** (smooth resampling, seconds) · **Auto** (AI when it needs ≤ 260 tiles ≈ 4–5 min, otherwise classic, with a note) · **AI** (always). |
+| AI strength | Mix of the AI result and the natural classic upscale (default 70%). Lower looks more natural; higher is sharper but can look "painted" on metal and specular highlights. |
+| Denoise | Edge-preserving noise reduction, applied *before* upscaling so noise is not enlarged. |
+| Sharpen | Unsharp mask at the output size (radius scales with the upscale factor). |
+| Auto tone | Gentle automatic levels, capped so dark or bright products are not blown out. |
+
+AI upscaling uses **Real-ESRGAN general-x4v3** (BSD-3-Clause, ≈ 5 MB, downloaded once from Hugging Face, runs in the browser on the CPU). The network takes fixed 128×128 tiles; the image is
+processed tile by tile and only each tile's context-free core is kept, written directly into the output canvas, so a 4K result never needs a huge intermediate image. Transparent images keep a
+verified alpha channel: colours under transparent pixels are bled from the subject first (no halos), alpha is resampled separately, and the exported PNG is re-checked as before.
+
+Measured on a 874×763 brass-statue photo → 3840×3352:
+
+| | Classic | AI |
+|---|---|---|
+| Time | 6.9 s | 89 s (72 tiles, ≈ 1.2 s/tile) |
+| Detail (Laplacian variance on the faces) | 17.8 | 255.6 |
+
+Full app path (process → 4K enhance with AI → export PNG): 10.4 MB RGBA file, corner alpha 0, centre alpha 255, alpha verified, 70 s.
+
+Honest limits: AI upscaling **invents** plausible detail, it does not recover lost pixels, and it can over-smooth or "paint" fine texture (use the AI strength slider). WebGPU was no faster than the CPU for this
+network on the test machine, so it runs on the CPU; big sources mean many tiles (a 2400×2400 image is ~530 tiles, roughly 10 minutes), which is why Auto falls back to classic there.
+Large 4K PNGs are tens of MB; use WebP/JPEG for smaller files.
+
 ### Limits you should know about
 
 - **OCR is weak on faint overlays.** On the 42–55% opacity test it misread "SAMPLE" and found nothing usable; it reads clean, high-contrast text well

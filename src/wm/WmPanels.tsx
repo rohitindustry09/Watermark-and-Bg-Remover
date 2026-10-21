@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { useWm, FORMATS, type WmTool } from './store'
 import { Btn, Section, Segmented, Select, Slider, Toggle } from '../components/ui'
+import { EnhancePanel } from '../components/EnhancePanel'
 import { CATEGORY_LABEL, type Category } from './overlay'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type RestoreMethod, type RestoreProfile } from './types'
 import { LAMA } from './lama'
@@ -250,6 +251,8 @@ export function WmRight() {
           </div>
         )}
       </Section>
+
+      <EnhancePanel width={item?.info?.width} height={item?.info?.height} />
 
       <Section title="Export">
         <Segmented<ExportFormat> label="Format" value={s.exportFormat} onChange={(exportFormat) => s.set({ exportFormat })} options={(Object.keys(FORMATS) as ExportFormat[]).map((f) => ({ value: f, label: FORMATS[f].label }))} />
