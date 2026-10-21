@@ -8,6 +8,38 @@ There is no backend and no image upload.
 
 React 19 · TypeScript · Vite · Tailwind CSS 4 · onnxruntime-web · Zustand · fflate.
 
+## Installation
+
+Requirements: [Node.js](https://nodejs.org) 22.12 or newer (24 recommended), npm, and a current Chrome/Edge (WebGPU) — Firefox/Safari work on the slower CPU path.
+No Python, no backend and no GPU drivers to install.
+
+```bash
+git clone https://github.com/rohitindustry09/Watermark-and-Bg-Remover.git
+cd Watermark-and-Bg-Remover
+npm ci
+npm run dev
+```
+
+Open <http://127.0.0.1:5173>. `npm ci` installs the locked dependencies and copies the OCR files into `public/ocr` (a `postinstall` step), so run it before the first `npm run dev`.
+
+- Background remover: <http://127.0.0.1:5173/>
+- Watermark / overlay removal: <http://127.0.0.1:5173/?mode=wm> (or use the **Background | Overlays** switch in the top bar)
+
+On Windows PowerShell the same commands work as written. If `npm run dev` complains about the Node version, check `node -v` and upgrade.
+
+AI models are **not** in the repository: each is downloaded once by your browser on first use (MODNet 25 MB, BiRefNet-lite 109–214 MB, RMBG-1.4 42–168 MB,
+LaMa 198 MB) and cached. Internet access is needed for that first download.
+
+Production build and tests:
+
+```bash
+npm run build      # type-check + production build into dist/
+npm run preview    # serve dist/ at http://127.0.0.1:4173
+npm test           # unit tests
+```
+
+Docker: `docker compose up --build` serves the built app at <http://localhost:8080>.
+
 ## Overlay removal (watermark / label / timestamp inpainting)
 
 For images **you own or are authorised to edit**: draft stamps, review labels, timestamps, your own watermarks. The app requires an authorisation
