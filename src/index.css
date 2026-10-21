@@ -1,0 +1,89 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink: #0d0e10;
+  --color-panel: #141619;
+  --color-raised: #1b1e22;
+  --color-line: #272b31;
+  --color-fg: #e6e8ea;
+  --color-muted: #8a919a;
+  --color-accent: #b9f45c;
+  --color-accent-ink: #12170a;
+  --color-danger: #ff6b5e;
+  --color-warn: #f5b942;
+  --font-sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  overscroll-behavior: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+input[type='range'] {
+  accent-color: var(--color-accent);
+  width: 100%;
+  height: 18px;
+}
+
+.checker {
+  background-color: #2a2d33;
+  background-image:
+    linear-gradient(45deg, #353940 25%, transparent 25%, transparent 75%, #353940 75%),
+    linear-gradient(45deg, #353940 25%, transparent 25%, transparent 75%, #353940 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    8px 8px;
+}
+.checker-light {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #e3e5e8 25%, transparent 25%, transparent 75%, #e3e5e8 75%),
+    linear-gradient(45deg, #e3e5e8 25%, transparent 25%, transparent 75%, #e3e5e8 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    8px 8px;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #343941 transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
