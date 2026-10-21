@@ -1,4 +1,4 @@
-import { detectText, findSimilar } from './detect'
+import { detectText, detectWithModel, findSimilar } from './detect'
 import { recognizeLines } from './ocr'
 import { classifyText } from './overlay'
 import { detectEdgeMarks, toneConsistency } from './marks'
@@ -54,6 +54,8 @@ export interface AutoOptions {
   thorough?: boolean
   /** The user states they own the images, so copyright/credit marks may be removed too. */
   includeOwnership?: boolean
+  /** Also run the trained watermark detector (optional model download). Implied by `thorough`. */
+  useDetector?: boolean
   signal?: AbortSignal
   onDownload?: (loaded: number, total: number) => void
 }
@@ -83,8 +85,17 @@ export async function autoRemoveWatermarks(
   opts: AutoOptions = {},
 ): Promise<{ result: RestoreResult | null; report: AutoWatermarkReport }> {
   const t0 = performance.now()
+  let detectorWarning = ''
   const { width: w, height: h } = source
   const regions: Region[] = await detectText(source, { rotated: !!(opts.rotated || opts.thorough), signal: opts.signal })
+  if (opts.useDetector || opts.thorough) {
+    try {
+      regions.push(...(await detectWithModel(source, { threshold: opts.thorough ? 0.25 : 0.4, onDownload: opts.onDownload, signal: opts.signal })))
+    } catch (e) {
+      if (opts.signal?.aborted) throw e
+      detectorWarning = `The AI watermark detector could not run (${e instanceof Error ? e.message : String(e)}).`
+    }
+  }
   const protectedText: string[] = []
   for (const m of detectEdgeMarks(source.data, w, h, opts.thorough ? 0.4 : 0.55)) {
     const credit = opts.includeOwnership ? null : await looksLikeOwnership(source, m.box, opts.signal)
@@ -122,6 +133,7 @@ export async function autoRemoveWatermarks(
   let chosen = regions.map((r) => {
     if (!allowed.has(r.category)) return { ...r, selected: false }
     if (r.kind === 'edge') return { ...r, selected: true }
+    if (r.kind === 'model') return { ...r, selected: r.confidence >= (opts.thorough ? 25 : 40) }
     const trusted = r.category === 'watermark' || r.category === 'draft' || r.category === 'ownership'
     const ok = trusted ? r.confidence >= 50 || (r.category !== 'watermark' && r.confidence >= 30) : r.confidence >= 55 && plausibleText(r) && looksLikeOverlay(r)
     return { ...r, selected: ok }
@@ -148,16 +160,18 @@ export async function autoRemoveWatermarks(
   }
   const skipped = [...protectedText, ...chosen.filter((r) => !r.selected).map(skipReason).filter(Boolean)].slice(0, 8)
   const removed = chosen.filter((r) => r.selected).length
-  const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: [], ms: 0 }
+  const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0 }
   if (!removed) {
     report.ms = performance.now() - t0
     return { result: null, report }
   }
-  const params = { ...DEFAULT_WM_PARAMS, method: 'auto' as const }
+  // Large or detector-found marks need contextual filling; Telea only suits small specks.
+  const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
+  const params = { ...DEFAULT_WM_PARAMS, method: hasLarge ? ('lama' as const) : ('auto' as const), expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
   const mask = buildMask(chosen, [], w, h, params)
   const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload })
   report.methods = result.methods
-  report.warnings = result.warnings
+  report.warnings = [...report.warnings, ...result.warnings]
   report.ms = performance.now() - t0
   return { result, report }
 }

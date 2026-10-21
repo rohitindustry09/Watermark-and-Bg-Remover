@@ -120,7 +120,7 @@ export function RightPanel() {
             {slider('feather', 'Feather', 0, 40, 1, ' px')}
             {slider('decontaminate', 'Colour decontamination', 0, 1, 0.05, '', 'Removes old background colour from edges (halos)')}
             {slider('islandPercent', 'Drop small specks', 0, 10, 0.1, ' %', 'Removes disconnected fragments smaller than this % of the main subject')}
-            <Toggle label="Fill enclosed holes" checked={p.fillHoles} onChange={(v) => s.updateParams({ fillHoles: v })} hint="Only holes completely surrounded by the subject; gaps open to the outside stay" />
+            <Toggle label="Fill holes the model was unsure about" checked={p.fillHoles} onChange={(v) => s.updateParams({ fillHoles: v })} hint="Gaps the model confidently called background (between an arm and the body, inside a handle) stay removed; only uncertain enclosed gaps are filled" />
             <div className="flex gap-2">
               <Btn onClick={s.undo} disabled={!item?.history.ops.length} className="flex-1">
                 Undo

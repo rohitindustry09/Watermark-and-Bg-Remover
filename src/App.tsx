@@ -54,7 +54,7 @@ function BgApp({ mode, onMode }: { mode: Mode; onMode: (m: Mode) => void }) {
       }
       if (mod || e.altKey) return
       const k = e.key
-      const tools: Record<string, Parameters<typeof st.setTool>[0]> = { v: 'pan', b: 'keep', e: 'erase', o: 'object', r: 'rect', l: 'lasso' }
+      const tools: Record<string, Parameters<typeof st.setTool>[0]> = { v: 'pan', w: 'wand', b: 'keep', e: 'erase', o: 'object', r: 'rect', l: 'lasso' }
       if (tools[k.toLowerCase()]) st.setTool(tools[k.toLowerCase()])
       else if (k === '[') st.setBrush(st.brushSize - (st.brushSize > 40 ? 10 : 4))
       else if (k === ']') st.setBrush(st.brushSize + (st.brushSize >= 40 ? 10 : 4))

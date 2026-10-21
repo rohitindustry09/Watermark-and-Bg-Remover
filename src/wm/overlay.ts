@@ -394,3 +394,78 @@ export function ringDetail(gray: Float32Array, mask: Uint8Array, w: number, h: n
     }
   return n ? sum / n / 2 : 0
 }
+
+export type VeilPolarity = 'auto' | 'light' | 'dark'
+
+/**
+ * Extracts the pixels of a translucent overlay (a watermark blended over a photo) inside a user-drawn shape.
+ * A morphological top-hat keeps strokes that are lighter (or darker) than their surroundings even when they sit on photo
+ * texture, at several stroke widths at once; the result is thresholded with Otsu inside the shape, closed so glyph interiors
+ * become solid, and holes are filled so the whole overlay (not just its outline) is selected.
+ */
+export function segmentVeil(gray: Float32Array, w: number, h: number, box: Box, inside?: (x: number, y: number) => boolean, polarity: VeilPolarity = 'auto'): RegionMask & { polarity: 'light' | 'dark' } {
+  const pad = Math.max(6, Math.round(Math.max(box[2] - box[0], box[3] - box[1]) * 0.05))
+  const r = clampBox([box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad], w, h)
+  const rw = r[2] - r[0]
+  const rh = r[3] - r[1]
+  const crop = new Float32Array(rw * rh)
+  for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) crop[y * rw + x] = gray[(r[1] + y) * w + r[0] + x]
+  const inShape = new Uint8Array(rw * rh)
+  let shapePx = 0
+  for (let y = 0; y < rh; y++)
+    for (let x = 0; x < rw; x++) {
+      const gx = r[0] + x
+      const gy = r[1] + y
+      if (gx >= box[0] && gx < box[2] && gy >= box[1] && gy < box[3] && (!inside || inside(gx, gy))) {
+        inShape[y * rw + x] = 1
+        shapePx++
+      }
+    }
+  const longest = Math.max(box[2] - box[0], box[3] - box[1])
+  const radii = [0.03, 0.06, 0.1].map((f) => Math.min(24, Math.max(3, Math.round(longest * f)))).filter((v, i, a) => a.indexOf(v) === i)
+  const tophat = (white: boolean): Float32Array => {
+    const out = new Float32Array(rw * rh)
+    for (const rad of radii) {
+      const base = white ? morph(morph(crop, rw, rh, rad, false), rw, rh, rad, true) : morph(morph(crop, rw, rh, rad, true), rw, rh, rad, false)
+      for (let i = 0; i < out.length; i++) {
+        const v = white ? crop[i] - base[i] : base[i] - crop[i]
+        if (v > out[i]) out[i] = v
+      }
+    }
+    return out
+  }
+  const candidates = (['light', 'dark'] as const).filter((p) => polarity === 'auto' || polarity === p).map((p) => ({ p, th: tophat(p === 'light') }))
+  const scored = candidates.map((c) => {
+    const vals: number[] = []
+    let max = 0
+    for (let i = 0; i < c.th.length; i++) if (inShape[i]) {
+      vals.push(c.th[i])
+      if (c.th[i] > max) max = c.th[i]
+    }
+    const thr = max < 6 ? Infinity : Math.max(8, otsu(vals, max))
+    let mass = 0
+    for (let i = 0; i < c.th.length; i++) if (inShape[i] && c.th[i] > thr) mass += c.th[i]
+    return { ...c, thr, mass }
+  })
+  const best = scored.reduce((a, b) => (b.mass > a.mass ? b : a))
+  const mask = new Uint8Array(rw * rh)
+  let count = 0
+  let sum = 0
+  if (Number.isFinite(best.thr)) {
+    for (let i = 0; i < mask.length; i++)
+      if (inShape[i] && best.th[i] > best.thr) {
+        mask[i] = 1
+        count++
+        sum += best.th[i]
+      }
+  }
+  const coverage = count / Math.max(1, shapePx)
+  if (coverage < 0.01 || coverage > 0.9) {
+    return { box: r, mask: inShape, coverage: 1, fallback: true, contrast: 0, polarity: best.p }
+  }
+  const radius = Math.max(2, Math.round(longest * 0.012))
+  let solid = closeMask(mask, rw, rh, radius)
+  solid = fillSmallHoles(solid, rw, rh, Math.max(60, radii[radii.length - 1] * radii[radii.length - 1] * 4))
+  for (let i = 0; i < solid.length; i++) if (!inShape[i]) solid[i] = 0
+  return { box: r, mask: solid, coverage, fallback: false, contrast: sum / Math.max(1, count) / 255, polarity: best.p }
+}

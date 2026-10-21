@@ -228,6 +228,9 @@ export function cleanRegions(
   islandPercent: number,
   fillHoles: boolean,
   regions?: LabelResult,
+  /** Model probability plane. When given, an enclosed hole is only filled if the model was unsure about it (mean ≥ 0.3);
+   *  holes the model confidently called background (e.g. the gap between an arm and the body) stay removed. */
+  evidence?: Float32Array,
 ): Float32Array {
   if (islandPercent <= 0 && !fillHoles) return a
   const reg = regions ?? labelRegions(a, w, h)
@@ -243,12 +246,14 @@ export function cleanRegions(
     touchesBorder[reg.labels[y * w + w - 1]] = 1
   }
   const minFg = (islandPercent / 100) * largestFg
+  const holeMean = new Float64Array(reg.count)
+  if (fillHoles && evidence) for (let i = 0; i < a.length; i++) if (!reg.isForeground[reg.labels[i]]) holeMean[reg.labels[i]] += evidence[i]
   const out = a.slice()
   for (let i = 0; i < a.length; i++) {
     const id = reg.labels[i]
     if (reg.isForeground[id]) {
       if (reg.sizes[id] < minFg) out[i] = 0
-    } else if (fillHoles && !touchesBorder[id] && reg.sizes[id] < largestFg * 0.25) {
+    } else if (fillHoles && !touchesBorder[id] && reg.sizes[id] < largestFg * 0.25 && (!evidence || holeMean[id] / reg.sizes[id] >= 0.3)) {
       out[i] = 1
     }
   }
@@ -352,7 +357,7 @@ export function refineMatte(input: RefineInput): Float32Array {
     a = m
   }
   a = applyLevels(a, params.strength, params.contrast)
-  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles)
+  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw)
   a = applyEdits(a, edits)
   if (params.shift !== 0) a = morph(a, w, h, params.shift, params.shift > 0)
   if (params.smooth > 0) a = softBlur(a, w, h, params.smooth)

@@ -30,7 +30,7 @@ import {
 } from './session'
 
 export type Status = 'queued' | 'decoding' | 'cleaning' | 'loading-model' | 'running' | 'done' | 'error' | 'cancelled'
-export type Tool = 'pan' | 'keep' | 'erase' | 'object' | 'rect' | 'lasso'
+export type Tool = 'pan' | 'keep' | 'erase' | 'object' | 'rect' | 'lasso' | 'wand'
 export type CompareMode = 'result' | 'original' | 'split'
 
 export interface Item {
@@ -63,6 +63,8 @@ interface Studio {
   items: Item[]
   activeId: string | null
   tool: Tool
+  wandTol: number
+  wandContiguous: boolean
   brushSize: number
   profile: Profile
   modelId: ModelId
@@ -82,6 +84,9 @@ interface Studio {
   wmAuthorized: boolean
   /** Remove every detected text line and mark, and search for repeated copies. */
   wmThorough: boolean
+  /** Use the trained watermark detector (optional 11 MB model) to find large / translucent marks. */
+  wmUseDetector: boolean
+  recreateClean(): void
   /** Also remove copyright/credit marks (the user states they own the images). */
   wmIncludeOwnership: boolean
   showMask: boolean
@@ -188,7 +193,7 @@ export const useStudio = create<Studio>((set, get) => {
       if (get().removeWatermarks && get().wmAuthorized) {
         patchItem(id, { status: 'cleaning' })
         try {
-          const { result, report } = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, signal, onDownload: (loaded, total) => set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
+          const { result, report } = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, signal, onDownload: (loaded, total) => set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
           set({ modelProgress: null })
           if (result) {
             const full = info.downscaled ? (await decodeFile(upload, Number.POSITIVE_INFINITY)).source : source
@@ -329,6 +334,8 @@ export const useStudio = create<Studio>((set, get) => {
     items: [],
     activeId: null,
     tool: 'pan',
+    wandTol: 28,
+    wandContiguous: true,
     brushSize: 28,
     profile: 'balanced',
     modelId: 'birefnet-lite',
@@ -346,6 +353,7 @@ export const useStudio = create<Studio>((set, get) => {
     removeWatermarks: false,
     wmAuthorized: false,
     wmThorough: false,
+    wmUseDetector: false,
     wmIncludeOwnership: false,
     showMask: false,
     showUncertain: false,
@@ -590,6 +598,18 @@ export const useStudio = create<Studio>((set, get) => {
       } finally {
         set({ exportProgress: null })
       }
+    },
+
+    recreateClean() {
+      const st = get()
+      if (!st.wmAuthorized) {
+        set({ notice: 'Tick “I own these images or am authorised to edit them” first.' })
+        return
+      }
+      set({ removeWatermarks: true, wmThorough: true, wmUseDetector: true })
+      const it = st.items.find((i) => i.id === st.activeId)
+      if (it) get().retry([it.id])
+      else set({ notice: 'Watermark removal is on for images you add next. Add an image to recreate it clean.' })
     },
 
     dismissNotice() {

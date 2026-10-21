@@ -7,6 +7,8 @@ export type Op =
   | { type: 'brush'; mode: EditMode; radius: number; points: [number, number][] }
   | { type: 'poly'; mode: EditMode; points: [number, number][] }
   | { type: 'region'; mode: EditMode; label: number }
+  /** Colour wand: pixels whose colour is within `tol` (RGB distance) of the seed colour; contiguous = flood fill from the seed. */
+  | { type: 'wand'; mode: EditMode; x: number; y: number; tol: number; contiguous: boolean }
 
 export interface History {
   ops: Op[]
@@ -70,7 +72,59 @@ function fillPolygon(edits: Uint8Array, w: number, h: number, pts: [number, numb
  * Replays ops into an edit plane: 0 = untouched, 1 = force keep, 2 = force remove.
  * `labels` is the region label map of the raw mask (for click-to-toggle region ops).
  */
-export function renderEdits(ops: readonly Op[], w: number, h: number, labels?: Int32Array): Uint8Array {
+export function wandSelect(rgba: Uint8ClampedArray, w: number, h: number, sx: number, sy: number, tol: number, contiguous: boolean): Uint8Array {
+  const out = new Uint8Array(w * h)
+  const x0 = Math.min(w - 1, Math.max(0, Math.floor(sx)))
+  const y0 = Math.min(h - 1, Math.max(0, Math.floor(sy)))
+  // Seed colour = mean of the 3×3 neighbourhood so one noisy pixel does not decide the selection.
+  let r = 0
+  let g = 0
+  let b = 0
+  let n = 0
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      const x = x0 + dx
+      const y = y0 + dy
+      if (x < 0 || y < 0 || x >= w || y >= h) continue
+      const o = (y * w + x) * 4
+      r += rgba[o]
+      g += rgba[o + 1]
+      b += rgba[o + 2]
+      n++
+    }
+  r /= n
+  g /= n
+  b /= n
+  const t2 = tol * tol
+  const close = (i: number): boolean => {
+    const dr = rgba[i * 4] - r
+    const dg = rgba[i * 4 + 1] - g
+    const db = rgba[i * 4 + 2] - b
+    return dr * dr + dg * dg + db * db <= t2
+  }
+  if (!contiguous) {
+    for (let i = 0; i < w * h; i++) if (close(i)) out[i] = 1
+    return out
+  }
+  const stack = new Int32Array(w * h)
+  let sp = 0
+  const seed = y0 * w + x0
+  if (!close(seed)) return out
+  out[seed] = 1
+  stack[sp++] = seed
+  while (sp > 0) {
+    const i = stack[--sp]
+    const x = i % w
+    const y = (i - x) / w
+    if (x > 0 && !out[i - 1] && close(i - 1)) (out[i - 1] = 1), (stack[sp++] = i - 1)
+    if (x < w - 1 && !out[i + 1] && close(i + 1)) (out[i + 1] = 1), (stack[sp++] = i + 1)
+    if (y > 0 && !out[i - w] && close(i - w)) (out[i - w] = 1), (stack[sp++] = i - w)
+    if (y < h - 1 && !out[i + w] && close(i + w)) (out[i + w] = 1), (stack[sp++] = i + w)
+  }
+  return out
+}
+
+export function renderEdits(ops: readonly Op[], w: number, h: number, labels?: Int32Array, rgba?: Uint8ClampedArray): Uint8Array {
   const edits = new Uint8Array(w * h)
   for (const op of ops) {
     const v = VALUE[op.mode]
@@ -90,6 +144,9 @@ export function renderEdits(ops: readonly Op[], w: number, h: number, labels?: I
       fillPolygon(edits, w, h, op.points, v)
     } else if (op.type === 'region' && labels) {
       for (let i = 0; i < labels.length; i++) if (labels[i] === op.label) edits[i] = v
+    } else if (op.type === 'wand' && rgba) {
+      const sel = wandSelect(rgba, w, h, op.x, op.y, op.tol, op.contiguous)
+      for (let i = 0; i < sel.length; i++) if (sel[i]) edits[i] = v
     }
   }
   return edits

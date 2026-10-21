@@ -41,7 +41,9 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
   if (area === 0) throw new Error('The removal mask is empty. Select a detected region or paint one first.')
   const filled = new Uint8ClampedArray(source.data)
   const methods = new Set<string>()
-  const clusters = clusterMask(mask, w, h, Math.max(4, params.teleaRadius * 2))
+  // LaMa reconstructs a whole 512 px window per call, so nearby pieces (the letters of one word, the words of one line) are merged
+  // into one crop; Telea works on tiny crops and keeps the tight grouping.
+  const clusters = clusterMask(mask, w, h, params.method === 'telea' ? Math.max(4, params.teleaRadius * 2) : Math.max(24, Math.round(Math.max(w, h) * 0.03)))
   const profile = WM_PROFILES[params.profile]
   const srcCanvas = canvasOf(source)
   const gray = toGray(source.data, w, h)

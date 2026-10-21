@@ -99,6 +99,35 @@ alone and reported), timestamps, or ordinary scene text. Everything it fills is 
 Measured on a synthetic test (gradient photo, 85% white "DRAFT COPY", a 50% logo strip and a "© ACME Studio" credit): the draft stamp was removed, the credit was left
 and reported; on the removed pixels PSNR against the true image rose from 10.4 dB to 24.8 dB (smooth background; textured areas will fare worse).
 
+### Watermarks over the object, and background showing through it
+
+Two problems were reproduced and fixed (see the numbers below):
+
+1. **Background visible inside the subject.** The hole filler used to turn *any* enclosed background gap (between an arm and the body, inside a handle) into subject, whatever
+   the model had said. It now fills only holes the model was unsure about; confident gaps stay removed. A new **Colour wand** tool (`W`) removes any background that still
+   shows inside or over the subject: click it, adjust the tolerance, and optionally untick *Only connected pixels* to remove that colour everywhere.
+2. **A big translucent watermark across the subject was not found, so cleanup happened only *around* it.** OCR cannot read large see-through text over a photo, and the corner-mark
+   detector only looks at the edges. There is now an optional trained detector (**Find watermarks (AI)** in the Overlays tool, **AI watermark detector** in the Background tool)
+   that returns boxes with a confidence; the overlay pixels are then extracted from inside each box (a multi-scale top-hat, light or dark detected automatically) and
+   filled with LaMa. It is an optional 11 MB download (`ayan4m1/Watermark-Detection-YOLO11-ONNX`, **AGPL-3.0**, so check that licence suits your use), never used unless you switch it on.
+
+**Recreate clean image (no watermark, no background)** in the Background tool turns on Thorough + the AI detector and re-runs the selected image: the watermark is removed first
+(so it can no longer punch holes in the cutout), then the background is removed from the cleaned image.
+
+Measured on a public-domain portrait with a 130 px rotated, 50%-opacity white "SAMPLE" stamped across the jacket (known ground truth):
+
+| | Watermark option off | Recreate clean |
+|---|---|---|
+| Exported cutout vs. the true photo, mean error (0–255) | 11.2 | 3.8 |
+| Pixels in the watermark area that are visibly wrong | 25% | 4% |
+| OCR alone found the watermark | no (read fragments such as "LE", "VE") | — |
+| AI detector found it | yes, confidence 0.82; no false detection on the clean photo | — |
+| Overlay-pixel PSNR (marked → restored) | 9.3 dB | 19.6 dB |
+
+Honest limits: thorough mode with LaMa is slow on the CPU (tens of seconds to minutes per image); the fill on a textured, detailed photo is an estimate and shows softness;
+the detector can miss stylised marks or flag non-marks, so always review the result; the fast MODNet portrait model fragments some subjects (use RMBG-1.4 for personal use or
+BiRefNet-lite on a working WebGPU device for better cutouts).
+
 ### Limits you should know about
 
 - **OCR is weak on faint overlays.** On the 42–55% opacity test it misread "SAMPLE" and found nothing usable; it reads clean, high-contrast text well
@@ -180,7 +209,7 @@ image at a time and keep only an 8-bit matte per image (oldest evicted beyond 24
 
 ## Keyboard shortcuts
 
-`V` pan · `B` keep brush · `E` erase brush · `O` object · `R` rectangle · `L` lasso · `[` `]` brush size · `Space` hold to pan ·
+`W` colour wand · `V` pan · `B` keep brush · `E` erase brush · `O` object · `R` rectangle · `L` lasso · `[` `]` brush size · `Space` hold to pan ·
 `0` fit · `1` 100 % · `+` `-` zoom · `\` split compare · `C` show original · `←` `→` previous/next image · `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo.
 
 ## Deployment

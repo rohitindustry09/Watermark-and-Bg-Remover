@@ -1,4 +1,5 @@
-import { classifyText, clampBox, downscaleGray, segmentOverlay, toGray, type Box } from './overlay'
+import { classifyText, clampBox, downscaleGray, segmentOverlay, segmentVeil, toGray, type Box } from './overlay'
+import { detectWatermarkBoxes } from './detector'
 import { recognizeLines, type OcrLine } from './ocr'
 import { wmClient } from './wmClient'
 import type { Region } from './types'
@@ -157,4 +158,34 @@ export async function findByReference(source: ImageData, reference: ImageData, e
   const boxes = await templateBoxes(source, { gray: refGray, w: reference.width, h: reference.height }, [0.5, 0.75, 1, 1.5, 2], 0.55)
   const fresh = boxes.filter((b) => !existing.some((r) => Math.abs(r.box[0] - b.box[0]) < 8 && Math.abs(r.box[1] - b.box[1]) < 8))
   return fresh.map((b) => patternRegion(source, gray, b.box, b.score, 'reference match', 'reference'))
+}
+
+/**
+ * Trained-detector pass: finds large, translucent or stylised watermarks that OCR cannot read, then extracts each mark's pixels
+ * inside its box with the overlay extractor. Candidates are returned unselected.
+ */
+export async function detectWithModel(
+  source: ImageData,
+  opts: { threshold?: number; onDownload?: (loaded: number, total: number) => void; signal?: AbortSignal } = {},
+): Promise<Region[]> {
+  const boxes = await detectWatermarkBoxes(source, opts.threshold ?? 0.3, opts.onDownload, opts.signal)
+  const { width: w, height: h } = source
+  const gray = toGray(source.data, w, h)
+  return boxes.map((d) => {
+    const seg = segmentVeil(gray, w, h, clampBox(d.box, w, h))
+    return {
+      id: uid(),
+      kind: 'model' as const,
+      text: 'AI-detected watermark',
+      confidence: Math.round(d.score * 100),
+      category: 'watermark' as const,
+      reason: `Found by the trained watermark detector (confidence ${(d.score * 100).toFixed(0)}%)${seg.fallback ? '; the whole box was selected because the overlay pixels could not be separated' : `; ${seg.polarity === 'light' ? 'lighter' : 'darker'} overlay pixels were extracted from inside the box`}.`,
+      box: seg.box,
+      mask: seg.mask,
+      angle: 0,
+      selected: false,
+      needsAuth: false,
+      authorized: false,
+    }
+  })
 }

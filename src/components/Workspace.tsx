@@ -140,7 +140,7 @@ export function Workspace() {
     if (e.button !== 0) return
     const out = toOut(e.clientX, e.clientY)
     const img = outToImage(placement.current, out[0], out[1])
-    const kind = tool === 'keep' || tool === 'erase' ? 'brush' : tool
+    const kind = tool === 'keep' || tool === 'erase' ? 'brush' : tool === 'wand' ? 'object' : tool
     live.current = { ...base, kind: kind as Live['kind'], img: [img], out: [out] }
     drawLive()
   }
@@ -182,7 +182,10 @@ export function Workspace() {
       s.commitOp({ type: 'poly', mode, points: [[x1, y1], [x2, y1], [x2, y2], [x1, y2]] })
     } else if (l.kind === 'object') {
       const [ix, iy] = [Math.floor(l.img[0][0]), Math.floor(l.img[0][1])]
-      if (ix >= 0 && iy >= 0 && ix < sess.w && iy < sess.h) s.commitOp({ type: 'region', mode, label: sess.labels[iy * sess.w + ix] })
+      if (ix >= 0 && iy >= 0 && ix < sess.w && iy < sess.h) {
+        if (tool === 'wand') s.commitOp({ type: 'wand', mode, x: ix, y: iy, tol: s.wandTol, contiguous: s.wandContiguous })
+        else s.commitOp({ type: 'region', mode, label: sess.labels[iy * sess.w + ix] })
+      }
     }
   }
 
@@ -245,7 +248,7 @@ export function Workspace() {
   const brushPx = placement.current ? brushSize * (placement.current.dw / placement.current.sw) * view.z : brushSize
   const showBrushCursor = ready && cursor && (tool === 'keep' || tool === 'erase') && !space.current
   const bgClass = previewColor === 'checker' ? 'checker' : previewColor === 'light' ? 'bg-white' : 'bg-black'
-  const stageCursor = tool === 'pan' ? 'grab' : tool === 'object' ? 'pointer' : 'crosshair'
+  const stageCursor = tool === 'pan' ? 'grab' : tool === 'object' || tool === 'wand' ? 'pointer' : 'crosshair'
 
   return (
     <div

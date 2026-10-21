@@ -6,7 +6,7 @@ import { buildZip, csvReport, extractImages } from '../lib/zip'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type Region, type WmItem, type WmParams, type WmStatus } from './types'
 import { buildMask, regionActive } from './mask'
 import { composeFullResolution, composeResult, restoreImage, type RestoreResult } from './restore'
-import { detectText, findByReference, findSimilar } from './detect'
+import { detectText, detectWithModel, findByReference, findSimilar } from './detect'
 import { wmClient } from './wmClient'
 import { maskArea, segmentOverlay, toGray, clampBox } from './overlay'
 import { pointInPoly } from './detect'
@@ -66,6 +66,7 @@ interface WmState {
   openItem(id: string): Promise<void>
   removeItem(id: string): void
   redetect(): Promise<void>
+  detectAI(): Promise<void>
   toggleRegion(regionId: string, selected?: boolean): void
   authorizeRegion(regionId: string, ok: boolean): void
   selectByCategory(cats: Region['category'][]): void
@@ -274,6 +275,21 @@ export const useWm = create<WmState>((set, get) => {
       } catch (e) {
         set({ progress: null, notice: `Detection failed: ${msg(e)}` })
         patch(it.id, { status: 'ready' })
+      }
+    },
+
+    async detectAI() {
+      const it = active()
+      if (!it || !session) return
+      try {
+        set({ progress: { label: 'AI watermark detector', done: 0, total: 1 } })
+        const found = await detectWithModel(session.source, { signal: abort.signal, onDownload: (loaded, total) => set({ download: { loaded, total } }) })
+        set({ progress: null, download: null })
+        const fresh = found.filter((r) => !it.regions.some((x) => Math.abs(x.box[0] - r.box[0]) < 12 && Math.abs(x.box[1] - r.box[1]) < 12))
+        patch(it.id, { regions: [...fresh, ...it.regions] })
+        set({ notice: fresh.length ? `The AI detector found ${fresh.length} watermark region${fresh.length === 1 ? '' : 's'}. They are listed first and not selected yet: review, then tick them.` : 'The AI detector found no watermark. Use the manual tools (rectangle/lasso with “Snap to overlay pixels”) for marks it misses.' })
+      } catch (e) {
+        set({ progress: null, download: null, notice: `AI detection failed: ${msg(e)}` })
       }
     },
 

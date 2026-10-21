@@ -9,6 +9,7 @@ const TOOLS: { id: Tool; label: string; key: string; hint: string }[] = [
   { id: 'keep', label: 'Keep brush', key: 'B', hint: 'Paint areas that must stay' },
   { id: 'erase', label: 'Erase brush', key: 'E', hint: 'Paint areas to remove' },
   { id: 'object', label: 'Object', key: 'O', hint: 'Click a region to remove/keep the whole thing' },
+  { id: 'wand', label: 'Colour wand', key: 'W', hint: 'Click background that still shows inside or over the subject to remove everything of that colour (or keep, with the Keep action)' },
   { id: 'rect', label: 'Rectangle', key: 'R', hint: 'Drag a rectangle to keep/remove' },
   { id: 'lasso', label: 'Lasso', key: 'L', hint: 'Draw a freehand shape to keep/remove' },
 ]
@@ -103,12 +104,16 @@ export function LeftPanel() {
         {s.removeWatermarks && s.wmAuthorized && (
           <>
             <Toggle label="Thorough: remove all detected text and marks" checked={s.wmThorough} onChange={(wmThorough) => s.set({ wmThorough })} hint="Also removes plain, unclassified and timestamp text, scans rotated text, uses a more sensitive logo detector and looks for repeated copies. May remove real scene text." />
+            <Toggle label="AI watermark detector (big / see-through marks)" checked={s.wmUseDetector} onChange={(wmUseDetector) => s.set({ wmUseDetector })} hint="Optional 11 MB model (AGPL-3.0). Finds large translucent marks over the subject that OCR misses" />
             <Toggle label="Include copyright / credit marks (I own them)" checked={s.wmIncludeOwnership} onChange={(wmIncludeOwnership) => s.set({ wmIncludeOwnership })} hint="Only for your own images" />
           </>
         )}
         <p className="text-[11.5px] leading-snug text-muted">
           When on, each new image is scanned for text watermarks (OCR) and uniform logo/stamp marks in corners and edges, and those are filled in. It cannot find every watermark (faint, patterned or full-image marks are often missed), never removes copyright/credit marks or ordinary scene text, and the fill is an estimate. Applies to images added after you switch it on.
         </p>
+        <Btn variant="primary" onClick={s.recreateClean} disabled={!s.wmAuthorized} title="Turns on Thorough + the AI detector, then re-runs the selected image: watermark removed first, then the background">
+          Recreate clean image (no watermark, no background)
+        </Btn>
         {item?.watermark && (
           <div className="rounded border border-line px-2 py-1.5 text-[11.5px]" role="status">
             <p>
@@ -172,9 +177,9 @@ export function LeftPanel() {
             </Btn>
           ))}
         </div>
-        {(s.tool === 'object' || s.tool === 'rect' || s.tool === 'lasso') && (
+        {(s.tool === 'object' || s.tool === 'wand' || s.tool === 'rect' || s.tool === 'lasso') && (
           <Segmented
-            label="Selection action"
+            label="Click / shape action"
             value={s.selAction}
             onChange={(v) => s.set({ selAction: v })}
             options={[
@@ -182,6 +187,12 @@ export function LeftPanel() {
               { value: 'keep', label: 'Keep' },
             ]}
           />
+        )}
+        {s.tool === 'wand' && (
+          <>
+            <Slider label="Wand tolerance" value={s.wandTol} min={4} max={120} onChange={(wandTol) => s.set({ wandTol })} hint="How different a colour may be from the clicked pixel and still be selected" />
+            <Toggle label="Only connected pixels" checked={s.wandContiguous} onChange={(wandContiguous) => s.set({ wandContiguous })} hint="Off = select that colour everywhere in the image, including gaps that are not connected" />
+          </>
         )}
         {(s.tool === 'keep' || s.tool === 'erase') && (
           <Slider label="Brush radius" value={s.brushSize} min={2} max={200} unit=" px" onChange={s.setBrush} hint="Radius in image pixels. Shortcuts: [ and ]" />

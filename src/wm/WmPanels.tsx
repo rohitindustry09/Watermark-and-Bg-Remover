@@ -64,6 +64,10 @@ export function WmLeft() {
           </Btn>
         </div>
         <input ref={refRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void s.useReference(f); e.target.value = '' }} />
+        <Btn onClick={() => void s.detectAI()} disabled={!item || s.busy} title="Trained detector for big, translucent or stylised watermarks that OCR cannot read (11 MB download, AGPL-3.0)">
+          Find watermarks (AI)
+        </Btn>
+        <p className="text-[11px] leading-snug text-muted">Finds large or see-through marks over the subject. Optional 11 MB model (Watermark-Detection-YOLO11, AGPL-3.0), downloaded once.</p>
         {item?.detectNote && <p className="text-[11.5px] text-muted">{item.detectNote}</p>}
         <p className="text-[11.5px] leading-snug text-muted">Detection only proposes candidates. Nothing is selected or removed until you choose it.</p>
       </Section>
