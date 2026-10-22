@@ -2,6 +2,7 @@ import { detectText, detectTint, detectWithModel } from './detect'
 import { toneConsistency } from './marks'
 import { toGray } from './overlay'
 import { buildMask } from './mask'
+import { groupKey, verifyMark, type SharedMarkPlanner } from './batch'
 import { restoreImage, type RestoreResult } from './restore'
 import { DEFAULT_WM_PARAMS, type Region } from './types'
 
@@ -15,6 +16,8 @@ export interface AutoWatermarkReport {
   methods: string[]
   warnings: string[]
   ms: number
+  /** True when OCR and the detector were skipped because shared marks learned from earlier images of the batch were re-verified on this image. */
+  shared?: boolean
 }
 
 export interface AutoOptions {
@@ -25,6 +28,8 @@ export interface AutoOptions {
   includeOwnership?: boolean
   /** Also run the trained watermark detector (optional model download). Implied by `thorough`. */
   useDetector?: boolean
+  /** Batch planner: learns marks that recur across same-size images and reuses them (see wm/batch.ts). */
+  planner?: SharedMarkPlanner
   signal?: AbortSignal
   onDownload?: (loaded: number, total: number) => void
 }
@@ -56,16 +61,32 @@ export async function autoRemoveWatermarks(
   const t0 = performance.now()
   let detectorWarning = ''
   const { width: w, height: h } = source
-  const regions: Region[] = await detectText(source, { rotated: !!(opts.rotated || opts.thorough), signal: opts.signal })
-  if (opts.useDetector || opts.thorough) {
-    try {
-      regions.push(...(await detectWithModel(source, { threshold: opts.thorough ? 0.25 : 0.4, onDownload: opts.onDownload, signal: opts.signal })))
-    } catch (e) {
-      if (opts.signal?.aborted) throw e
-      detectorWarning = `The AI watermark detector could not run (${e instanceof Error ? e.message : String(e)}).`
-    }
+  const key = groupKey(w, h, `${opts.thorough ? 't' : ''}${opts.useDetector ? 'd' : ''}${opts.includeOwnership ? 'o' : ''}${opts.rotated ? 'r' : ''}`)
+  let regions: Region[] = []
+  let sharedUsed = false
+  const sharedIds = new Set<string>()
+  const sharedMarks = opts.planner?.marksFor(key)
+  if (sharedMarks) {
+    const g = toGray(source.data, w, h)
+    const verified = sharedMarks.map((m) => verifyMark(g, w, h, m))
+    if (verified.every((v) => v.ok)) {
+      for (const v of verified) sharedIds.add(v.region!.id)
+      regions = [...verified.map((v) => v.region!), ...detectTint(source)]
+      sharedUsed = true
+    } else opts.planner?.miss(key)
   }
-  regions.push(...detectTint(source))
+  if (!sharedUsed) {
+    regions = await detectText(source, { rotated: !!(opts.rotated || opts.thorough), signal: opts.signal })
+    if (opts.useDetector || opts.thorough) {
+      try {
+        regions.push(...(await detectWithModel(source, { threshold: opts.thorough ? 0.25 : 0.4, onDownload: opts.onDownload, signal: opts.signal })))
+      } catch (e) {
+        if (opts.signal?.aborted) throw e
+        detectorWarning = `The AI watermark detector could not run (${e instanceof Error ? e.message : String(e)}).`
+      }
+    }
+    regions.push(...detectTint(source))
+  }
   const protectedText: string[] = []
   // The corner/edge statistics detector (wm/marks.ts `detectEdgeMarks`) is deliberately NOT used here: it cannot tell a logo from a bright part of
   // the subject, and in Thorough mode it made LaMa repaint a statue's foot, lotus, mace and crown. Corner logos are found by the trained detector.
@@ -82,6 +103,7 @@ export async function autoRemoveWatermarks(
   // Classified watermark/draft text is trusted. Anything else (thorough mode) must be plausible text that is uniformly lighter or darker than
   // its surroundings; this rejects OCR noise on photo detail, which would otherwise be rewritten.
   let chosen = regions.map((r) => {
+    if (sharedIds.has(r.id)) return r // learned from images where full detection already chose it, and re-verified on this one
     if (!allowed.has(r.category)) return { ...r, selected: false }
     if (r.kind === 'tint') return { ...r, selected: r.confidence >= 40 }
     if (r.kind === 'model') return { ...r, selected: r.confidence >= (opts.thorough ? 25 : 40) }
@@ -106,7 +128,8 @@ export async function autoRemoveWatermarks(
   // surface detail (statue ropework, fabric) and repaints it. It remains a manual, reviewed action in the Overlays tool ("Find similar marks").
   const skipped = [...protectedText, ...chosen.filter((r) => !r.selected).map(skipReason).filter(Boolean)].slice(0, 8)
   const removed = chosen.filter((r) => r.selected).length
-  const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0 }
+  if (!sharedUsed) opts.planner?.learn(key, chosen.filter((r) => r.selected))
+  const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0, shared: sharedUsed || undefined }
   if (!removed) {
     report.ms = performance.now() - t0
     return { result: null, report }

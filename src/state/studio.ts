@@ -17,6 +17,9 @@ import { emptyHistory, pushOp, redo as redoH, undo as undoH, type History, type 
 import { ExportError, downloadBlob, encodeCanvas, exportFilename, validateExport, type AlphaCheck, type ExportFormat } from '../lib/exporter'
 import { buildZip, csvReport, extractImages } from '../lib/zip'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
+import { SharedMarkPlanner } from '../wm/batch'
+import { fingerprint, resume, settingsHash } from '../lib/resume'
+import { useEnhance } from '../enhance/store'
 import { applyEnhance, canvasStats, cancelEnhance } from '../enhance/apply'
 import { composeFullResolution, composeResult } from '../wm/restore'
 import {
@@ -159,6 +162,9 @@ function messageOfInner(e: unknown): string {
   return String(e)
 }
 
+/** Learns watermark positions that recur across same-size images of a batch, so later images skip OCR and the detector. */
+const markPlanner = new SharedMarkPlanner(3)
+
 const mapItem = (items: Item[], id: string, fn: (i: Item) => Item): Item[] => items.map((i) => (i.id === id ? fn(i) : i))
 
 export const useStudio = create<Studio>((set, get) => {
@@ -203,19 +209,33 @@ export const useStudio = create<Studio>((set, get) => {
       let source = decoded.source
       if (get().removeWatermarks && get().wmAuthorized) {
         patchItem(id, { status: 'cleaning' })
+        const quick = (warning: string): AutoWatermarkReport => ({ found: 0, removed: 0, skipped: [], methods: [], warnings: [warning], ms: 0 })
         try {
-          const { result, report } = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, signal, onDownload: (loaded, total) => set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
-          set({ modelProgress: null })
-          if (result) {
-            const full = info.downscaled ? (await decodeFile(upload, Number.POSITIVE_INFINITY)).source : source
-            const finalImg = composeFullResolution(full, source, result)
-            const canvas = new OffscreenCanvas(finalImg.width, finalImg.height)
-            canvas.getContext('2d')!.putImageData(finalImg, 0, 0)
-            const blob = await canvas.convertToBlob({ type: 'image/png' })
-            source = composeResult(source, result)
-            patchItem(id, { file: new File([blob], upload.name, { type: 'image/png' }), origFile: upload, watermark: report })
+          const wmKey = `${await fingerprint(upload)}|${settingsHash({ t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, e: maxEdge })}`
+          const saved = await resume.get('wm', wmKey)
+          if (saved) {
+            // Finished earlier (this run or a previous session): an empty blob means "no watermark found".
+            if (saved.blob.size > 0) {
+              const cleaned = new File([saved.blob], upload.name, { type: 'image/png' })
+              source = (await decodeFile(cleaned, maxEdge)).source
+              patchItem(id, { file: cleaned, origFile: upload, watermark: quick('Watermark removal restored from saved progress.') })
+            } else patchItem(id, { file: upload, origFile: undefined, watermark: quick('No watermark found (saved result).') })
           } else {
-            patchItem(id, { file: upload, origFile: undefined, watermark: report })
+            const { result, report } = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, planner: markPlanner, signal, onDownload: (loaded, total) => set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
+            set({ modelProgress: null })
+            if (result) {
+              const full = info.downscaled ? (await decodeFile(upload, Number.POSITIVE_INFINITY)).source : source
+              const finalImg = composeFullResolution(full, source, result)
+              const canvas = new OffscreenCanvas(finalImg.width, finalImg.height)
+              canvas.getContext('2d')!.putImageData(finalImg, 0, 0)
+              const blob = await canvas.convertToBlob({ type: 'image/png' })
+              source = composeResult(source, result)
+              patchItem(id, { file: new File([blob], upload.name, { type: 'image/png' }), origFile: upload, watermark: report })
+              void resume.put('wm', wmKey, blob)
+            } else {
+              patchItem(id, { file: upload, origFile: undefined, watermark: report })
+              void resume.put('wm', wmKey, new Blob([]))
+            }
           }
         } catch (e) {
           set({ modelProgress: null })
@@ -347,6 +367,29 @@ export const useStudio = create<Studio>((set, get) => {
     }
   }
 
+  /**
+   * Export with resume: a file already exported under the same image + settings (this run or an earlier, interrupted one) is reused.
+   * The key covers everything that changes the output, so editing a mask or switching background re-renders correctly.
+   */
+  async function renderOrResume(it: Item): Promise<{ blob: Blob; check: AlphaCheck; name: string }> {
+    const st = get()
+    let key: string | null = null
+    try {
+      const { progress: _p, lastNote: _n, ...enhance } = useEnhance.getState() as unknown as Record<string, unknown>
+      key = `${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership] })}`
+      const saved = await resume.get('export', key)
+      if (saved?.meta) {
+        const m = JSON.parse(saved.meta) as { name: string; check: AlphaCheck }
+        return { blob: saved.blob, name: m.name, check: m.check }
+      }
+    } catch {
+      key = null
+    }
+    const r = await renderItem(it.id)
+    if (key) void resume.put('export', key, r.blob, JSON.stringify({ name: r.name, check: r.check }))
+    return r
+  }
+
   return {
     items: [],
     activeId: null,
@@ -401,6 +444,7 @@ export const useStudio = create<Studio>((set, get) => {
           }
         } else accepted.push(f)
       }
+      if (!get().items.length) markPlanner.reset()
       const base = get().profile
       const items: Item[] = accepted.map((file) => ({
         id: uid(),
@@ -596,7 +640,7 @@ export const useStudio = create<Studio>((set, get) => {
       set({ exportProgress: { done: 0, total: done.length } })
       for (const [n, it] of done.entries()) {
         try {
-          const r = await renderItem(it.id)
+          const r = await renderOrResume(it)
           entries.push({ name: r.name, blob: r.blob })
           rows.push({ source: it.name, output: r.name, status: 'ok', bytes: r.blob.size, alpha_check: r.check.detail, model_ms: Math.round(it.timing?.ms ?? 0), model: it.timing?.model ?? '' })
         } catch (e) {

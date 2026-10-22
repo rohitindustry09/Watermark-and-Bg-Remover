@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { resume } from '../lib/resume'
 import { useStudio, type Tool } from '../state/studio'
 import { useWm } from '../wm/store'
 import { MODEL_LIST, PROFILES, type Profile } from '../lib/models'
@@ -114,12 +115,14 @@ export function LeftPanel() {
         <Btn variant="primary" onClick={s.recreateClean} disabled={!s.wmAuthorized} title="Turns on Thorough + the AI detector, then re-runs the selected image: watermark removed first, then the background">
           Recreate clean image (no watermark, no background)
         </Btn>
+        <SavedProgress />
         {item?.watermark && (
           <div className="rounded border border-line px-2 py-1.5 text-[11.5px]" role="status">
             <p>
               Watermark scan: {item.watermark.found} candidate{item.watermark.found === 1 ? '' : 's'}, <b>{item.watermark.removed} removed</b>
               {item.watermark.methods.length ? ` (${item.watermark.methods.join(' + ')})` : ''}.
             </p>
+            {item.watermark.shared && <p className="text-muted">Used the marks learned from earlier images in this batch (re-checked on this image), so OCR was skipped.</p>}
             {item.watermark.skipped.map((t) => (
               <p key={t} className="text-muted">
                 Left: {t}
@@ -220,5 +223,24 @@ export function LeftPanel() {
         </p>
       </Section>
     </div>
+  )
+}
+
+/** Finished watermark-removal and export results kept in this browser so an interrupted batch can resume. */
+function SavedProgress() {
+  const [count, setCount] = useState(0)
+  const busy = useStudio((s) => s.busy)
+  const exporting = useStudio((s) => s.exportProgress)
+  useEffect(() => {
+    void resume.count().then(setCount)
+  }, [busy, exporting])
+  if (!count) return null
+  return (
+    <p className="text-[11.5px] text-muted" role="status">
+      {count} finished step{count === 1 ? '' : 's'} saved in this browser: if the page closes mid-batch, add the same files again and they are not redone.{' '}
+      <button type="button" className="underline" onClick={() => void resume.clear().then(() => setCount(0))}>
+        Clear
+      </button>
+    </p>
   )
 }

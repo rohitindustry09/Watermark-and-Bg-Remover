@@ -157,6 +157,23 @@ On the statue's base the result keeps the rope detail and the rim line instead o
 look of the fill varies with the surrounding texture. The full Thorough run on the statue took 78–81 s on the CPU with the guided fill (59 s with the unguided version; 65–86 s before this change
 when it repainted 5–19 regions; single runs each, not averaged).
 
+### Bulk batches: shared marks, fast fill, resume
+
+For a ZIP or a multi-file drop with **Remove watermarks first** on (`src/wm/batch.ts`, `src/lib/resume.ts`):
+
+- **Shared marks.** The first 3 images of each size group are fully analysed. A mark that appears in the same place in most of them becomes a *shared mark*. Later images of that
+  group skip OCR and the AI detector: each shared mark is re-checked on the image's own pixels (the overlay is re-segmented in that box and must overlap the learned mask), and an image that
+  fails the check falls back to full detection. After two failed checks a group stops sharing, so a batch with varying watermarks never skips detection wrongly. The colour (tint) detector is
+  cheap and runs on every image. A clean image in a sharing group fails the check and is analysed in full, so it is correct but not faster.
+- **Fast fill.** In *Automatic* mode a region whose surroundings are a plain backdrop (very low local contrast) is filled with Telea instead of LaMa; textured surroundings use Patch, others LaMa.
+- **Resume.** Finished watermark-removal results and finished exports are stored in this browser (IndexedDB), keyed by the file's content fingerprint plus every setting that changes the
+  output (a mask edit or background change re-renders correctly). If the tab crashes or closes mid-batch, add the same files again and finished steps are reused. Up to 400 entries
+  (oldest evicted); a *Clear* link in the Watermark panel empties it. The cutout (matte) step itself is not saved: it is recomputed, which takes seconds per image.
+
+Measured on the 990×990 statue photo (single runs on the CPU, with the hidden-pane throttling that makes timings noisy): Thorough detection alone costs about 19 s of rotated OCR plus
+4 s for the AI detector per image, which shared marks skip; the same run on the learned images reused the same 4 regions (mask 3.39% vs 3.30% on a noisy copy). End-to-end image times
+varied between 37 s and 70 s because the LaMa/Patch fill dominates, so I do not claim a precise end-to-end speed-up. Parallel workers are not implemented.
+
 ### Image enhancer: 4K upscaling and quality boost (both tools)
 
 The **Enhance & upscale (4K)** panel (right side, above Export; **off by default**) improves the final, recreated image **when you export it**, so what you get is the clean image

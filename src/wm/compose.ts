@@ -6,15 +6,20 @@ import type { RestoreMethod } from './types'
 export const SMALL_REGION_PX = 40
 /** Mean local contrast (see `ringDetail`) above which the surroundings count as real texture that a smooth fill would blur. */
 export const PATCH_DETAIL = 8
+/** Ring contrast at or below which the surroundings count as a plain backdrop, where a fast Telea fill is enough. */
+export const PLAIN_DETAIL = 3.5
 /** Largest cluster (masked pixels) the exemplar fill takes on; its cost grows with the hole area. */
 export const PATCH_MAX_AREA = 40_000
 /**
  * Method that "auto" picks for a cluster: textured surroundings get exemplar (patch) filling, which copies real detail; plain
  * surroundings get Telea for small marks and LaMa for large ones. `detail`/`area` are optional so callers without them keep the size rule.
  */
-export function pickMethod(method: RestoreMethod, box: Box, detail = 0, area = 0): 'telea' | 'lama' | 'patch' {
+export function pickMethod(method: RestoreMethod, box: Box, detail?: number, area = 0): 'telea' | 'lama' | 'patch' {
   if (method !== 'auto') return method
+  if (detail === undefined) return Math.max(box[2] - box[0], box[3] - box[1]) <= SMALL_REGION_PX ? 'telea' : 'lama'
   if (detail >= PATCH_DETAIL && area > 0 && area <= PATCH_MAX_AREA) return 'patch'
+  // Fast fill: on a plain backdrop a diffusion fill is indistinguishable from LaMa and ~30× quicker.
+  if (detail <= PLAIN_DETAIL) return 'telea'
   return Math.max(box[2] - box[0], box[3] - box[1]) <= SMALL_REGION_PX ? 'telea' : 'lama'
 }
 
