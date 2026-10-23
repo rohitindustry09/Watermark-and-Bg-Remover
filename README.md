@@ -183,6 +183,13 @@ and a logo block with spec text on the backdrop. Everything below was checked on
 - **LaMa and memory.** LaMa is a 198 MB model that needs well over 1 GB once loaded. On a 5.5 GB PC with about 0.5 GB free, loading it killed the whole browser. Devices that report 4 GB or less now skip
   it in automatic mode (a switch in the Watermark panel, or `?lama=1` / `?lama=0`, overrides). Text strokes never need it anyway: thin strokes are filled with Telea and real texture patches.
 
+- **Exact letters, not slabs (second pass on the bowl).** The first version left red and green specks and, at zoom, a mosaic over the carved ornament. Cause: the stroke masks covered 35-45% of
+  each text box (relief around the letters counted as text), and growing them by 3-5 px merged everything into two slabs, which were then filled with texture tiles. Now (`src/wm/strokes.ts`):
+  only features about one stroke wide count (thin top-hats), plus colour cues that survive shadow (a local hue difference and ln(R/G), because dark red letters on a dark red-brown carving barely
+  differ in hue *angle*); candidates are ranked by strength and capped at a text-like share of the box (22%, also after closing gaps); each text region grows by about one stroke width on its own
+  instead of the global 3-5 px; a hue-based mark that the text detector already covers is dropped (its blobs spilled over the carving); and a cluster that is *mostly* thin strokes is repaired with
+  Telea only (texture patches tile visibly over blurred or glossy relief). Result at 4x zoom: no letters, no ghosts, no red or green remnants, ornament structure intact.
+
 Result on the two photos: the statue loses the "Statues" stamp, the spec lines and the badge and keeps both spires; the bowl loses both lines of the overlay, keeps its whole interior and the figure on
 top, and has no stray blob. An 8-image mixed batch (both photos alternating, CPU path, roughly 0.5 GB of RAM free) finished with no crash in 90 s: 23 s for the first image and 8–11 s for each of the rest (it was about 20 s each before the cutout was reused).
 

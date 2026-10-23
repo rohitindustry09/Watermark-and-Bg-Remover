@@ -69,7 +69,8 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
     let method = pickMethod(params.method, c.box, params.method === 'auto' ? clusterDetail(gray, mask, c.box, w, h) : 0, clusterArea)
     // Text strokes are a few pixels wide: Telea fills those cleanly, so LaMa (slow, memory hungry) is kept for solid areas.
     const thin = params.method === 'auto' && isThin(mask, c.box, w, h, params.expand + 3)
-    if (method === 'lama' && thin) method = 'telea'
+    // Thin strokes (text): a small diffusion repair is exact and clean. Texture patches tile visibly over glossy or blurred relief, and LaMa is overkill.
+    if (thin && (method === 'lama' || method === 'patch')) method = 'telea'
     if (method === 'lama' && !lamaOk) method = clusterArea <= PATCH_MAX_AREA * 2 && params.method === 'auto' ? 'patch' : 'telea'
     if (method === 'lama' && lamaCount >= MAX_LAMA_CLUSTERS) {
       method = 'telea'
@@ -181,16 +182,27 @@ function clusterDetail(gray: Float32Array, mask: Uint8Array, box: Box, w: number
   return ringDetail(g, m, cw, ch)
 }
 
-/** True when no part of the cluster is thicker than about `2 × erode` pixels (text strokes, thin lines): eroding it by `erode` leaves nothing. */
+/**
+ * True when the cluster is mostly thin strokes (text, thin lines): after eroding by `erode` only a small share of its pixels survives. A few thick
+ * spots (noise merged into the mask) must not make a whole line of lettering count as a solid area.
+ */
 export function isThin(mask: Uint8Array, box: Box, w: number, h: number, erode: number): boolean {
   const [x0, y0, x1, y1] = cropBounds(box, 2, w, h)
   const cw = x1 - x0
   const ch = y1 - y0
   const local = new Uint8Array(cw * ch)
-  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) local[y * cw + x] = mask[(y0 + y) * w + x0 + x]
+  let total = 0
+  for (let y = 0; y < ch; y++)
+    for (let x = 0; x < cw; x++) {
+      const v = mask[(y0 + y) * w + x0 + x]
+      local[y * cw + x] = v
+      total += v
+    }
+  if (!total) return true
   const core = erodeBinary(local, cw, ch, erode)
-  for (let i = 0; i < core.length; i++) if (core[i]) return false
-  return true
+  let kept = 0
+  for (let i = 0; i < core.length; i++) kept += core[i]
+  return kept / total < 0.08
 }
 
 /** Masked pixels inside a box (one cluster's area, plus any neighbour's pixels that fall in the box). */

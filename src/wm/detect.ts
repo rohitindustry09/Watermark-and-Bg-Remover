@@ -1,6 +1,7 @@
-import { classifyText, clampBox, downscaleGray, segmentOverlay, segmentVeil, toGray, unionRegionMasks, type Box } from './overlay'
+import { classifyText, clampBox, downscaleGray, segmentOverlay, segmentVeil, toGray, type Box } from './overlay'
 import { detectWatermarkBoxes } from './detector'
 import { detectSatMarks, detectTintMarks } from './marks'
+import { extractTextStrokes, strokeWidthFor } from './strokes'
 import { detectTextBoxes } from './textDetector'
 import { recognizeLines, type OcrLine } from './ocr'
 import { wmClient } from './wmClient'
@@ -194,40 +195,29 @@ export async function detectWithModel(
 
 /**
  * Text-shaped overlays found by the text detector: stylised, translucent or low-contrast brand text that OCR cannot read. Each box is refined to
- * the mark's own pixels with the overlay extractor. Candidates are returned unselected; `auto.ts` decides what to remove.
+ * the letters' own pixels (thin-stroke extractor, strokes.ts). Candidates are returned unselected; `auto.ts` decides what to remove.
  */
 export async function detectTextOverlays(source: ImageData, opts: { onDownload?: (loaded: number, total: number) => void; signal?: AbortSignal } = {}): Promise<Region[]> {
   const { boxes } = await detectTextBoxes(source, { onDownload: opts.onDownload, signal: opts.signal })
   const { width: w, height: h } = source
-  const gray = toGray(source.data, w, h)
   return boxes.map((d) => {
-    // Two extractors with different blind spots: the veil (top-hat) finds light or dark strokes of one polarity and picked the gold highlights
-    // instead of dark red text; the local-contrast segmentation handles either polarity but also picks up some relief. Their union covers the text.
+    // Thin-stroke extraction (see strokes.ts). The generic overlay extractors use elements as large as the box and, on glossy relief, turned the whole
+    // band into "text"; letters are thin, so only features about one stroke wide, and pixels that differ in colour from their surroundings, count.
     const cb = clampBox(d.box, w, h)
-    const veil = segmentVeil(gray, w, h, cb)
-    const local = segmentOverlay(gray, w, h, cb)
-    const seg =
-      veil.fallback && local.fallback
-        ? { ...veil, polarity: veil.polarity }
-        : veil.fallback
-          ? { ...local, polarity: veil.polarity, fallback: false }
-          : local.fallback
-            ? veil
-            : { ...veil, ...unionRegionMasks(veil, local) }
-    const boxArea = Math.max(1, (seg.box[2] - seg.box[0]) * (seg.box[3] - seg.box[1]))
-    let px = 0
-    for (let i = 0; i < seg.mask.length; i++) px += seg.mask[i]
+    const strokes = extractTextStrokes(source.data, w, h, cb)
+    const seg = strokes ?? { box: cb, mask: new Uint8Array((cb[2] - cb[0]) * (cb[3] - cb[1])).fill(1), coverage: 1 }
     return {
       id: uid(),
       kind: 'textdet' as const,
       text: 'text overlay',
       confidence: Math.round(d.score * 100),
       category: 'watermark' as const,
-      reason: `Text-shaped marks found by the text detector (confidence ${(d.score * 100).toFixed(0)}%)${seg.fallback ? '; the whole box was selected because the strokes could not be separated' : `; ${seg.polarity === 'light' ? 'lighter' : 'darker'} strokes were extracted from inside the box`}.`,
+      reason: `Text-shaped marks found by the text detector (confidence ${(d.score * 100).toFixed(0)}%)${strokes ? '; the letter strokes were extracted from inside the box' : '; the whole box was selected because the strokes could not be separated'}.`,
       box: seg.box,
       mask: seg.mask,
       angle: 0,
-      coverage: seg.fallback ? 1 : px / boxArea,
+      coverage: seg.coverage,
+      grow: strokes ? Math.min(4, Math.max(2, strokeWidthFor(Math.min(seg.box[2] - seg.box[0], seg.box[3] - seg.box[1])))) : undefined, // soft, antialiased edges reach about one stroke width past the extracted pixels
       selected: false,
       needsAuth: false,
       authorized: false,

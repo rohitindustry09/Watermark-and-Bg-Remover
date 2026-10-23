@@ -139,14 +139,14 @@ export async function autoRemoveWatermarks(
   // the subject, and in Thorough mode it made LaMa repaint a statue's foot, lotus, mace and crown. Corner logos are found by the trained detector.
   const allowed = allowedCategories(opts)
   const gray = toGray(source.data, w, h)
-  // A hue-based tint mark is easy to fool (a reddish wall, a subject's warm highlights): it needs the text detector to agree, or a clear
-  // text-line shape with high confidence. Saturation marks are already limited to the border band and sparse logo-like shapes.
+  // A hue-based tint mark is easy to fool (a reddish wall, a subject's warm highlights): it is only used for a clear text-line shape with high
+  // confidence; where the text detector already covers the text, its stroke mask is used instead (the tint mask spilled over carved relief). Saturation marks are already limited to the border band and sparse logo-like shapes.
   const textBoxes = regions.filter((r) => r.kind === 'textdet').map((r) => r.box)
   const tintTrusted = (r: Region): boolean => {
     if (r.text === 'coloured logo') return true
     const bw = r.box[2] - r.box[0]
     const bh = r.box[3] - r.box[1]
-    if (textBoxes.some((b) => boxShare(r.box, b) >= 0.5)) return true
+    if (textBoxes.some((b) => boxShare(r.box, b) >= 0.5)) return false // the text detector's own stroke mask already covers this text, more precisely
     return bw >= 3.5 * bh && r.confidence >= 65
   }
   const looksLikeOverlay = (r: Region): boolean => {
@@ -222,7 +222,7 @@ export async function autoRemoveWatermarks(
   }
   // Large or detector-found marks need contextual filling; Telea only suits small specks. 'auto' also copies real texture (patch fill)
   // where the surroundings are textured, so a recreated rope/engraving stays sharp instead of being smoothed.
-  const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'textdet' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
+  const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
   const params = { ...DEFAULT_WM_PARAMS, method: 'auto' as const, expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
   const mask = buildMask(chosen, [], w, h, params)
   const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload, lama: opts.useLama })
