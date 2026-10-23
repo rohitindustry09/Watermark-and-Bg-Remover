@@ -1,7 +1,7 @@
 import type { Box, Category } from './overlay'
 import type { History } from '../lib/ops'
 
-export type DetectKind = 'ocr' | 'pattern' | 'reference' | 'manual' | 'edge' | 'model' | 'tint'
+export type DetectKind = 'ocr' | 'pattern' | 'reference' | 'manual' | 'edge' | 'model' | 'tint' | 'textdet'
 
 export interface Region {
   id: string
@@ -17,6 +17,8 @@ export interface Region {
   mask: Uint8Array
   /** Angle of the text line in degrees. */
   angle: number
+  /** Share of the box covered by the extracted mask (1 = the whole box, i.e. the strokes could not be separated). */
+  coverage?: number
   selected: boolean
   /** True when the region looks like an ownership/attribution mark. Selecting it needs explicit per-region authorisation. */
   needsAuth: boolean

@@ -106,11 +106,12 @@ export function LeftPanel() {
           <>
             <Toggle label="Thorough: remove all detected text and marks" checked={s.wmThorough} onChange={(wmThorough) => s.set({ wmThorough })} hint="Also removes plain, unclassified and timestamp text, scans rotated text, uses a more sensitive logo detector and looks for repeated copies. May remove real scene text." />
             <Toggle label="AI watermark detector (big / see-through marks)" checked={s.wmUseDetector} onChange={(wmUseDetector) => s.set({ wmUseDetector })} hint="Optional 11 MB model (AGPL-3.0). Finds large translucent marks over the subject that OCR misses" />
+            <Toggle label="Use LaMa for large solid marks" checked={s.wmUseLama} onChange={(wmUseLama) => s.set({ wmUseLama })} hint="A 198 MB model that needs about 2 GB of free memory; on a low-memory PC loading it can crash the tab, so it is off by default there. Text marks never need it: thin strokes are filled with Telea plus real texture." />
             <Toggle label="Include copyright / credit marks (I own them)" checked={s.wmIncludeOwnership} onChange={(wmIncludeOwnership) => s.set({ wmIncludeOwnership })} hint="Only for your own images" />
           </>
         )}
         <p className="text-[11.5px] leading-snug text-muted">
-          When on, each new image is scanned for text watermarks (OCR) and uniform logo/stamp marks in corners and edges, and those are filled in. It cannot find every watermark (faint, patterned or full-image marks are often missed), never removes copyright/credit marks or ordinary scene text, and the fill is an estimate. Applies to images added after you switch it on.
+          When on, the subject is cut out first, then each image is scanned for watermarks (a text detector for stylised or translucent brand text, OCR, coloured marks) and the ones touching the subject are filled in; marks on the backdrop leave with it. It cannot find every watermark (faint, patterned or full-image marks are often missed), never removes copyright/credit marks or ordinary scene text, and the fill is an estimate. Applies to images added after you switch it on.
         </p>
         <Btn variant="primary" onClick={s.recreateClean} disabled={!s.wmAuthorized} title="Turns on Thorough + the AI detector, then re-runs the selected image: watermark removed first, then the background">
           Recreate clean image (no watermark, no background)

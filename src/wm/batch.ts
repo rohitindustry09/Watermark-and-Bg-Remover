@@ -93,7 +93,7 @@ export function verifyMark(gray: Float32Array, w: number, h: number, mark: Share
   const [x0, y0, x1, y1] = mark.box
   if (x0 < 0 || y0 < 0 || x1 > w || y1 > h) return { ok: false, region: null }
   // Re-segment with the extractor that produced the learned mask, so the two are comparable.
-  const own = mark.kind === 'model' ? segmentVeil(gray, w, h, mark.box) : segmentOverlay(gray, w, h, mark.box)
+  const own = mark.kind === 'model' || mark.kind === 'textdet' ? segmentVeil(gray, w, h, mark.box) : segmentOverlay(gray, w, h, mark.box)
   const bw = x1 - x0
   const bh = y1 - y0
   const ownInBox = new Uint8Array(bw * bh)

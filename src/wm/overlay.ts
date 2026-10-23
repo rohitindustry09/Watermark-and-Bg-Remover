@@ -486,3 +486,20 @@ export function labelBoxes(m: Uint8Array, w: number, h: number): { box: Box; are
   }
   return [...boxes.values()].sort((a, b) => b.area - a.area)
 }
+
+/** Union of two region masks (each over its own box) as one mask over the box that contains both. */
+export function unionRegionMasks(a: { box: Box; mask: Uint8Array }, b: { box: Box; mask: Uint8Array }): { box: Box; mask: Uint8Array } {
+  const box: Box = [Math.min(a.box[0], b.box[0]), Math.min(a.box[1], b.box[1]), Math.max(a.box[2], b.box[2]), Math.max(a.box[3], b.box[3])]
+  const w = box[2] - box[0]
+  const mask = new Uint8Array(w * (box[3] - box[1]))
+  for (const m of [a, b]) {
+    const mw = m.box[2] - m.box[0]
+    for (let i = 0; i < m.mask.length; i++) {
+      if (!m.mask[i]) continue
+      const x = m.box[0] + (i % mw)
+      const y = m.box[1] + Math.floor(i / mw)
+      mask[(y - box[1]) * w + (x - box[0])] = 1
+    }
+  }
+  return { box, mask }
+}

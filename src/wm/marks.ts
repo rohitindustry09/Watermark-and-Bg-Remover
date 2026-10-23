@@ -155,6 +155,8 @@ export function toneConsistency(gray: Float32Array, w: number, box: Box, mask: U
 }
 
 export interface TintMark {
+  /** `hue`: off-palette hue (text lines); `sat`: far more saturated than the rest of the image (logos, stamps). */
+  via?: 'hue' | 'sat'
   box: Box
   mask: Uint8Array
   /** 0..1 heuristic support. Not a probability. */
@@ -225,7 +227,8 @@ export function detectTintMarks(rgba: Uint8ClampedArray, w: number, h: number): 
     const [x0, y0, x1, y1] = c.box
     const bw = x1 - x0
     const bh = y1 - y0
-    if (bw < 24 || bh < 8 || bw * bh > n * 0.15) continue
+    // A tinted watermark is a line of text: clearly wider than tall. Reddish scenery (a wooden wall, a subject's warm highlights) forms blobs.
+    if (bw < 24 || bh < 8 || bw * bh > n * 0.15 || bw < 2.2 * bh) continue
     let cnt = 0
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (off[y * w + x] && joined[y * w + x]) cnt++
     if (cnt < 80 || cnt / (bw * bh) < 0.06) continue
@@ -316,4 +319,99 @@ function growTint(rgba: Uint8ClampedArray, w: number, h: number, dom: number, m:
       if (lx >= 0 && ly >= 0 && lx < rw && ly < rh && kept[ly * rw + lx]) mask[y * bw + x] = 1
     }
   return { ...m, box, mask: closeMask(mask, bw, bh, 3) }
+}
+
+/** Share of each image side treated as the border band where logos and stamps sit. */
+const SAT_BAND = 0.18
+
+/**
+ * Coloured marks that the hue test cannot see: an orange logo or stamp on a peach backdrop and a silver subject has nearly the image's own hue
+ * but is far more *saturated* than anything else in the picture. Pixels whose saturation clearly exceeds the image's own 95th percentile, inside
+ * the border band only (subjects sit in the middle, so their accents are not touched), that form small, sparse, text- or logo-like blobs are reported.
+ * Silent on images whose subject is itself strongly coloured (brass, a red garment): there the percentile is high, so nothing stands out.
+ */
+export function detectSatMarks(rgba: Uint8ClampedArray, w: number, h: number): TintMark[] {
+  if (w < 120 || h < 120) return []
+  const n = w * h
+  const sat = new Uint8Array(n)
+  const hist = new Uint32Array(256)
+  let counted = 0
+  for (let i = 0; i < n; i++) {
+    const r = rgba[i * 4]
+    const g = rgba[i * 4 + 1]
+    const b = rgba[i * 4 + 2]
+    const mx = Math.max(r, g, b)
+    if (mx < 51) continue // too dark to carry a reliable saturation
+    const q = Math.round(((mx - Math.min(r, g, b)) / mx) * 255)
+    sat[i] = q
+    hist[q]++
+    counted++
+  }
+  if (counted < n * 0.2) return []
+  let acc = 0
+  let p95 = 255
+  for (let q = 0; q < 256; q++) {
+    acc += hist[q]
+    if (acc >= counted * 0.95) {
+      p95 = q
+      break
+    }
+  }
+  const thr = Math.max(0.45 * 255, p95 + 0.12 * 255)
+  if (thr > 250) return []
+  const bx = Math.round(w * SAT_BAND)
+  const by = Math.round(h * SAT_BAND)
+  const off = new Uint8Array(n)
+  let offCount = 0
+  for (let y = 0; y < h; y++) {
+    const inY = y < by || y >= h - by
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x
+      if (sat[i] >= thr && (inY || x < bx || x >= w - bx)) {
+        off[i] = 1
+        offCount++
+      }
+    }
+  }
+  if (offCount < 60 || offCount > n * 0.03) return []
+  const joined = resizeMask(closeMask(off, w, h, 2), w, h, 5)
+  const out: TintMark[] = []
+  for (const c of labelBoxes(joined, w, h)) {
+    const [x0, y0, x1, y1] = c.box
+    const bw = x1 - x0
+    const bh = y1 - y0
+    if (bw < 24 || bh < 8 || bw * bh > n * 0.03) continue
+    let cnt = 0
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (off[y * w + x] && joined[y * w + x]) cnt++
+    const fill = cnt / (bw * bh)
+    if (cnt < 60 || fill < 0.05 || fill > 0.6) continue // text and logos are sparse; a solid blob is more likely a coloured part of the subject
+    // A stamp stands clearly apart from its immediate surroundings. A vivid patch inside an equally vivid area (a red wall) does not.
+    const ring = clampBox([x0 - 10, y0 - 10, x1 + 10, y1 + 10], w, h)
+    let markSat = 0
+    let ringSat = 0
+    let ringN = 0
+    for (let y = ring[1]; y < ring[3]; y++)
+      for (let x = ring[0]; x < ring[2]; x++) {
+        const i = y * w + x
+        if (off[i]) markSat += sat[i]
+        else if (!joined[i]) {
+          ringSat += sat[i]
+          ringN++
+        }
+      }
+    if (!ringN || markSat / cnt / 255 - ringSat / ringN / 255 < 0.25) continue
+    const box = clampBox([x0 - 4, y0 - 4, x1 + 4, y1 + 4], w, h)
+    const mw = box[2] - box[0]
+    const mask = new Uint8Array(mw * (box[3] - box[1]))
+    for (let y = box[1]; y < box[3]; y++) for (let x = box[0]; x < box[2]; x++) if (off[y * w + x]) mask[(y - box[1]) * mw + (x - box[0])] = 1
+    out.push({
+      box,
+      mask: closeMask(mask, mw, box[3] - box[1], 3),
+      score: Math.min(1, 0.45 + fill),
+      via: 'sat',
+      hue: 0,
+      reason: `Much more saturated than anything else in this image (saturation above ${(thr / 2.55).toFixed(0)}%), sitting in the border band as a small, sparse, text- or logo-like shape — typical of a coloured logo or stamp.`,
+    })
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 4)
 }

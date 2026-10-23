@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { DEFAULT_PARAMS, analyseMatte, resamplePlane, type Analysis, type RefineParams } from '../lib/matte'
-import { PROFILES, MODELS, type ModelId, type Profile } from '../lib/models'
+import { CPU_FALLBACK, PROFILES, MODELS, type ModelId, type Profile } from '../lib/models'
 import { decodeFile, DecodeError, makeThumbnail, type ImageInfo } from '../lib/decode'
 import { EngineError, detectDevice, disableGpu, loadModel, segment, type DeviceInfo } from '../lib/engine'
 import {
@@ -20,6 +20,7 @@ import { dirOf, joinPath } from '../lib/paths'
 import { makeGate } from '../lib/throttle'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
 import { SharedMarkPlanner } from '../wm/batch'
+import { lamaAllowedByDefault } from '../wm/lama'
 import { fingerprint, resume, settingsHash } from '../lib/resume'
 import { useEnhance } from '../enhance/store'
 import { applyEnhance, canvasStats, cancelEnhance } from '../enhance/apply'
@@ -97,6 +98,8 @@ interface Studio {
   recreateClean(): void
   /** Also remove copyright/credit marks (the user states they own the images). */
   wmIncludeOwnership: boolean
+  /** Allow LaMa for large solid marks. Off by default on devices with little memory, where loading it can crash the tab. */
+  wmUseLama: boolean
   showMask: boolean
   showUncertain: boolean
   selAction: 'erase' | 'keep'
@@ -175,6 +178,20 @@ const downloadGate = makeGate(150)
 /** Upper bound for the watermark stage of one image (detection plus every fill), so one bad image cannot hold up a whole batch. */
 const WATERMARK_STAGE_TIMEOUT_MS = 8 * 60_000
 
+/** Subject mask (1 = foreground) at the working size from a model matte, or undefined when the matte is implausible (nothing / everything). */
+function subjectMask(res: { matte: Float32Array; outW: number; outH: number }, w: number, h: number): Uint8Array | undefined {
+  const m = resamplePlane(res.matte, res.outW, res.outH, w, h)
+  const mask = new Uint8Array(w * h)
+  let n = 0
+  for (let i = 0; i < mask.length; i++)
+    if (m[i] > 0.5) {
+      mask[i] = 1
+      n++
+    }
+  const share = n / (w * h)
+  return share >= 0.02 && share <= 0.98 ? mask : undefined
+}
+
 const mapItem = (items: Item[], id: string, fn: (i: Item) => Item): Item[] => items.map((i) => (i.id === id ? fn(i) : i))
 
 export const useStudio = create<Studio>((set, get) => {
@@ -217,11 +234,41 @@ export const useStudio = create<Studio>((set, get) => {
       const decoded = await decodeFile(upload, maxEdge)
       const info = decoded.info
       let source = decoded.source
-      if (get().removeWatermarks && get().wmAuthorized) {
+      const wantWm = get().removeWatermarks && get().wmAuthorized
+      const thumb = item.thumb ?? (await makeThumbnail(source))
+      patchItem(id, { info, thumb, status: 'loading-model' })
+      let modelId = get().modelId
+      const run = async (src: ImageData) => {
+        patchItem(id, { status: 'loading-model' })
+        if (MODELS[modelId].gpuOnly && (await detectDevice()).device !== 'webgpu') {
+          modelId = CPU_FALLBACK
+          set({ notice: `${MODELS[get().modelId].name} needs WebGPU, so ${MODELS[CPU_FALLBACK].name} was used on the CPU instead (it handles products and objects; ${MODELS[CPU_FALLBACK].licenseNote}). Pick another model in the sidebar to change this.` })
+        }
+        const model = await loadModel(modelId, (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: MODELS[modelId].name, loaded, total } }), signal)
+        set({ modelProgress: null })
+        if (signal.aborted) throw new EngineError('Cancelled', 'cancelled')
+        patchItem(id, { status: 'running' })
+        return { model, res: await segment(model, src, signal) }
+      }
+      const segmentNow = async (src: ImageData): Promise<Awaited<ReturnType<typeof run>>> => {
+        try {
+          return await run(src)
+        } catch (e) {
+          const dev = await detectDevice()
+          if (dev.device !== 'webgpu' || (e instanceof EngineError && e.code === 'cancelled')) throw e
+          // GPU path failed (driver/shader/memory): fall back to the CPU backend once.
+          disableGpu(messageOf(e))
+          set({ device: await detectDevice(), notice: 'GPU inference failed on this device, so processing continues on the CPU (slower).' })
+          return await run(src)
+        }
+      }
+      // Cut out the subject first. Watermark removal then only has to repaint marks that touch the subject: marks on the backdrop leave with it.
+      let out = await segmentNow(source)
+      if (wantWm) {
         patchItem(id, { status: 'cleaning' })
         const quick = (warning: string): AutoWatermarkReport => ({ found: 0, removed: 0, skipped: [], methods: [], warnings: [warning], ms: 0 })
         try {
-          const wmKey = `${item.dir}|${await fingerprint(upload)}|${settingsHash({ t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, e: maxEdge })}`
+          const wmKey = `${item.dir}|${await fingerprint(upload)}|${settingsHash({ v: 2, m: modelId, t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, l: get().wmUseLama, k: get().bg.kind === 'blur', e: maxEdge })}`
           const saved = await resume.get('wm', wmKey)
           if (saved) {
             // Finished earlier (this run or a previous session): an empty blob means "no watermark found".
@@ -238,7 +285,9 @@ export const useStudio = create<Studio>((set, get) => {
             const stageTimer = setTimeout(() => stage.abort(), WATERMARK_STAGE_TIMEOUT_MS)
             let outcome: Awaited<ReturnType<typeof autoRemoveWatermarks>>
             try {
-              outcome = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, planner: markPlanner, signal: stage.signal, onDownload: (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
+              // Keeping the original background (blur) means marks on it stay visible, so then every mark counts, not just those on the subject.
+              const focus = get().bg.kind === 'blur' ? undefined : subjectMask(out.res, source.width, source.height)
+              outcome = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, useLama: get().wmUseLama, focus, planner: markPlanner, signal: stage.signal, onDownload: (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: 'Downloading a model', loaded, total } }) })
             } catch (e) {
               if (stage.signal.aborted && !signal.aborted) throw new Error(`Watermark removal took longer than ${WATERMARK_STAGE_TIMEOUT_MS / 60000} minutes and was skipped for this image.`)
               throw e
@@ -257,6 +306,7 @@ export const useStudio = create<Studio>((set, get) => {
               source = composeResult(source, result)
               patchItem(id, { file: new File([blob], upload.name, { type: 'image/png' }), origFile: upload, watermark: report })
               void resume.put('wm', wmKey, blob)
+              // The first cutout is kept: repainting a watermark does not change the subject's outline, and cutting the image out again would cost a third of the time.
             } else {
               patchItem(id, { file: upload, origFile: undefined, watermark: report })
               void resume.put('wm', wmKey, new Blob([]))
@@ -269,32 +319,6 @@ export const useStudio = create<Studio>((set, get) => {
         }
       } else if (item.origFile) {
         patchItem(id, { file: item.origFile, origFile: undefined, watermark: undefined })
-      }
-      const thumb = item.thumb ?? (await makeThumbnail(source))
-      patchItem(id, { info, thumb, status: 'loading-model' })
-      let modelId = get().modelId
-      const run = async () => {
-        patchItem(id, { status: 'loading-model' })
-        if (MODELS[modelId].gpuOnly && (await detectDevice()).device !== 'webgpu') {
-          modelId = 'modnet'
-          set({ notice: `${MODELS[get().modelId].name} needs WebGPU, so MODNet (portrait) was used on the CPU instead. Pick another model in the sidebar if the result is poor.` })
-        }
-        const model = await loadModel(modelId, (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: MODELS[modelId].name, loaded, total } }), signal)
-        set({ modelProgress: null })
-        if (signal.aborted) throw new EngineError('Cancelled', 'cancelled')
-        patchItem(id, { status: 'running' })
-        return { model, res: await segment(model, source, signal) }
-      }
-      let out: Awaited<ReturnType<typeof run>>
-      try {
-        out = await run()
-      } catch (e) {
-        const dev = await detectDevice()
-        if (dev.device !== 'webgpu' || (e instanceof EngineError && e.code === 'cancelled')) throw e
-        // GPU path failed (driver/shader/memory): fall back to the CPU backend once.
-        disableGpu(messageOf(e))
-        set({ device: await detectDevice(), notice: 'GPU inference failed on this device, so processing continues on the CPU (slower).' })
-        out = await run()
       }
       const { res } = out
       const raw = resamplePlane(res.matte, res.outW, res.outH, source.width, source.height)
@@ -403,7 +427,7 @@ export const useStudio = create<Studio>((set, get) => {
     let key: string | null = null
     try {
       const { progress: _p, lastNote: _n, ...enhance } = useEnhance.getState() as unknown as Record<string, unknown>
-      key = `${it.dir}|${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership] })}`
+      key = `${it.dir}|${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership, st.wmUseLama] })}`
       const saved = await resume.get('export', key)
       if (saved?.meta) {
         const m = JSON.parse(saved.meta) as { name: string; check: AlphaCheck }
@@ -442,6 +466,7 @@ export const useStudio = create<Studio>((set, get) => {
     wmThorough: false,
     wmUseDetector: false,
     wmIncludeOwnership: false,
+    wmUseLama: lamaAllowedByDefault(),
     showMask: false,
     showUncertain: false,
     selAction: 'erase',

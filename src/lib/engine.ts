@@ -16,11 +16,46 @@ export interface DeviceInfo {
 
 let deviceInfo: Promise<DeviceInfo> | null = null
 
+const GPU_FLAG = 'cutout-studio:gpu-disabled'
+const GPU_FLAG_DAYS = 14
+
+/** A GPU that failed once (a hung driver costs a 60 s wait) stays off for a while, so later sessions do not wait again. `?device=gpu` clears it. */
+function gpuDisabledEarlier(): string | null {
+  try {
+    if (new URLSearchParams(globalThis.location?.search ?? '').get('device') === 'gpu') {
+      localStorage.removeItem(GPU_FLAG)
+      return null
+    }
+    const raw = localStorage.getItem(GPU_FLAG)
+    if (!raw) return null
+    const f = JSON.parse(raw) as { at: number; reason: string }
+    if (Date.now() - f.at > GPU_FLAG_DAYS * 86_400_000) {
+      localStorage.removeItem(GPU_FLAG)
+      return null
+    }
+    return f.reason
+  } catch {
+    return null
+  }
+}
+
+function rememberGpuFailure(reason: string): void {
+  try {
+    localStorage.setItem(GPU_FLAG, JSON.stringify({ at: Date.now(), reason: reason.slice(0, 80) }))
+  } catch {
+    // storage unavailable: the GPU is only skipped for this session
+  }
+}
+
 export function detectDevice(): Promise<DeviceInfo> {
   deviceInfo ??= (async (): Promise<DeviceInfo> => {
     const threads = wasmThreads()
     const params = new URLSearchParams(globalThis.location?.search ?? '')
-    const forced = params.get('device') // ?device=cpu forces the CPU backend; ?fp16=0 forces fp32 weights on the GPU
+    const forced = params.get('device') // ?device=cpu forces the CPU backend; ?device=gpu retries a GPU that failed earlier; ?fp16=0 forces fp32 weights on the GPU
+    const earlier = gpuDisabledEarlier()
+    if (earlier && forced !== 'gpu') {
+      return { device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU skipped after an earlier failure (open with ?device=gpu to retry)` }
+    }
     try {
       const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<{ features: Set<string> } | null> } }).gpu
       const adapter = gpu && forced !== 'cpu' ? await gpu.requestAdapter() : null
@@ -37,6 +72,7 @@ export function detectDevice(): Promise<DeviceInfo> {
 
 /** Called when the GPU path fails at run time: all later work (including a retry) uses the CPU backend. */
 export function disableGpu(reason: string): void {
+  rememberGpuFailure(reason)
   const threads = wasmThreads()
   deviceInfo = Promise.resolve({ device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU unavailable: ${reason.slice(0, 60)}` })
   for (const p of sessions.values()) void p.then((m) => m.session.release()).catch(() => undefined)
@@ -62,7 +98,7 @@ inferClient.onReset(() => {
 export type EngineErrorCode = 'model-unavailable' | 'gpu-init' | 'out-of-memory' | 'inference' | 'timeout' | 'cancelled'
 
 /** Hard limits so a hung GPU driver or runaway CPU run cannot freeze a batch forever. */
-export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 60_000, wasm: 300_000 }
+export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 30_000, wasm: 300_000 }
 
 export class EngineError extends Error {
   constructor(

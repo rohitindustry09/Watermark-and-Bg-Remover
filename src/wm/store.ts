@@ -8,7 +8,7 @@ import { makeGate } from '../lib/throttle'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type Region, type WmItem, type WmParams, type WmStatus } from './types'
 import { buildMask, regionActive } from './mask'
 import { composeFullResolution, composeResult, restoreImage, type RestoreResult } from './restore'
-import { detectText, detectTint, detectWithModel, findByReference, findSimilar } from './detect'
+import { detectText, detectTint, detectWithModel, findByReference, findSimilar, detectTextOverlays } from './detect'
 import { wmClient } from './wmClient'
 import { maskArea, segmentOverlay, toGray, clampBox } from './overlay'
 import { applyEnhance } from '../enhance/apply'
@@ -129,7 +129,14 @@ export const useWm = create<WmState>((set, get) => {
       if (get().autoDetect) {
         const regions = await detectText(source, { rotated: get().rotatedScan, signal, onProgress: (d, t) => progGate(d >= t) && set({ progress: { label: `Reading text in ${it.name}`, done: d, total: t } }) })
         set({ progress: null })
-        const withTint = [...detectTint(source), ...regions]
+        let overlays: Awaited<ReturnType<typeof detectTextOverlays>> = []
+        try {
+          overlays = await detectTextOverlays(source, { signal, onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }) })
+        } catch (e) {
+          if (signal.aborted) throw e // the other detectors still give a useful list if the text detector is unavailable
+        }
+        set({ download: null })
+        const withTint = [...overlays, ...detectTint(source), ...regions]
         patch(id, { regions: withTint, status: 'ready', detectNote: withTint.length ? undefined : 'No readable text found. Use the manual selection tools, or “Find similar” / a reference image for logos.' })
       }
       if (!get().activeId) await get().openItem(id)

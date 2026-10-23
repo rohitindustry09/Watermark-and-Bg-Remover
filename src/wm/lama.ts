@@ -28,6 +28,19 @@ export class LamaError extends Error {
 /** One 512×512 fill takes seconds to ~90 s on a slow CPU; past this the run is stopped (the worker is restarted) instead of hanging the batch. */
 const RUN_TIMEOUT_MS = 240_000
 
+/**
+ * LaMa is a 198 MB model that needs well over 1 GB of memory once loaded. On a device that reports 4 GB or less the tab can be killed outright
+ * (seen on a 5.5 GB PC: the whole browser exited while loading it), which looks like "stuck". Automatic mode therefore skips LaMa there and fills
+ * with Telea + real-texture patches, which need no model. `?lama=1` forces it on, `?lama=0` off; choosing LaMa explicitly always loads it.
+ */
+export function lamaAllowedByDefault(): boolean {
+  const q = new URLSearchParams(globalThis.location?.search ?? '').get('lama')
+  if (q === '1') return true
+  if (q === '0') return false
+  const mem = (globalThis.navigator as Navigator & { deviceMemory?: number } | undefined)?.deviceMemory
+  return mem === undefined || mem > 4
+}
+
 let loading: Promise<InferSession> | null = null
 inferClient.onReset(() => {
   loading = null

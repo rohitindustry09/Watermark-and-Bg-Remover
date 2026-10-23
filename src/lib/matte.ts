@@ -1,6 +1,6 @@
 // Pure alpha-matte operations on Float32Array planes (values 0..1, row-major, w*h).
 // No DOM access, so everything here is unit-testable under Node.
-import { morphGray } from './morphology'
+import { dilateBinary, morphGray } from './morphology'
 
 export interface RefineParams {
   /** Guided-filter detail recovery, 0..1 (snaps the matte to real image edges). */
@@ -11,7 +11,7 @@ export interface RefineParams {
   strength: number
   /** Edge steepness 0..1: higher = crisper alpha transition. */
   contrast: number
-  /** Drop disconnected foreground specks smaller than this % of the largest region. */
+  /** Drop disconnected foreground specks smaller than this % of the largest region (unless they sit right next to it). */
   islandPercent: number
   fillHoles: boolean
   /** Pixels; positive expands the subject, negative contracts it. */
@@ -32,7 +32,7 @@ export const DEFAULT_PARAMS: RefineParams = {
   detailRadius: 4,
   strength: 0,
   contrast: 0.3,
-  islandPercent: 0.5,
+  islandPercent: 2,
   fillHoles: true,
   shift: 0,
   smooth: 0,
@@ -209,6 +209,8 @@ export function cleanRegions(
   /** Model probability plane. When given, an enclosed hole is only filled if the model was unsure about it (mean ≥ 0.3);
    *  holes the model confidently called background (e.g. the gap between an arm and the body) stay removed. */
   evidence?: Float32Array,
+  /** Small pieces within this many pixels of the largest region are kept (thin parts, detached tips); only distant specks are dropped. */
+  nearPx = 0,
 ): Float32Array {
   if (islandPercent <= 0 && !fillHoles) return a
   const reg = regions ?? labelRegions(a, w, h)
@@ -224,13 +226,23 @@ export function cleanRegions(
     touchesBorder[reg.labels[y * w + w - 1]] = 1
   }
   const minFg = (islandPercent / 100) * largestFg
+  // Components that touch the zone around the largest region survive even when small.
+  const nearLargest = new Uint8Array(reg.count)
+  if (nearPx > 0 && minFg > 0 && largestFg > 0) {
+    let largestId = -1
+    for (let i = 0; i < reg.count; i++) if (reg.isForeground[i] && reg.sizes[i] === largestFg) largestId = i
+    const core = new Uint8Array(a.length)
+    for (let i = 0; i < a.length; i++) if (reg.labels[i] === largestId) core[i] = 1
+    const zone = dilateBinary(core, w, h, nearPx)
+    for (let i = 0; i < a.length; i++) if (zone[i]) nearLargest[reg.labels[i]] = 1
+  }
   const holeMean = new Float64Array(reg.count)
   if (fillHoles && evidence) for (let i = 0; i < a.length; i++) if (!reg.isForeground[reg.labels[i]]) holeMean[reg.labels[i]] += evidence[i]
   const out = a.slice()
   for (let i = 0; i < a.length; i++) {
     const id = reg.labels[i]
     if (reg.isForeground[id]) {
-      if (reg.sizes[id] < minFg) out[i] = 0
+      if (reg.sizes[id] < minFg && !nearLargest[id]) out[i] = 0
     } else if (fillHoles && !touchesBorder[id] && reg.sizes[id] < largestFg * 0.25 && (!evidence || holeMean[id] / reg.sizes[id] >= 0.3)) {
       out[i] = 1
     }
@@ -338,7 +350,7 @@ export function refineMatte(input: RefineInput): Float32Array {
   }
   a = applyLevels(a, params.strength, params.contrast)
   if (rgba && params.snap > 0) a = snapToBackdrop(a, rgba, w, h, params.snap)
-  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw)
+  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw, Math.round(Math.min(w, h) * 0.015))
   a = applyEdits(a, edits)
   if (params.shift !== 0) a = morph(a, w, h, params.shift, params.shift > 0)
   if (params.smooth > 0) a = softBlur(a, w, h, params.smooth)

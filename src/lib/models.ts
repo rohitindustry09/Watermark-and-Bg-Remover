@@ -27,6 +27,13 @@ export interface ModelSpec {
   output: 'logits' | 'matte'
 }
 
+/**
+ * Model used when the selected one cannot run (BiRefNet-lite needs WebGPU, and a GPU that hangs is switched off). MODNet is a portrait
+ * matting model: on products it punches holes through shiny interiors and drops thin parts (a statue's base spires), so it is not a fallback.
+ * RMBG-1.4 has a small int8 build that runs on the CPU and handles objects; its licence is non-commercial, which the notice says.
+ */
+export const CPU_FALLBACK: ModelId = 'rmbg-1.4'
+
 const HOST = (import.meta.env?.VITE_MODEL_HOST as string | undefined) ?? 'https://huggingface.co'
 
 export const MODELS: Record<ModelId, ModelSpec> = {

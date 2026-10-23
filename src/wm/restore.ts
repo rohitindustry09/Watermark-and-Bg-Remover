@@ -1,7 +1,8 @@
 import { resamplePlane } from '../lib/matte'
 import { blendAlpha, composeResult, PATCH_MAX_AREA, pickMethod, SMALL_REGION_PX } from './compose'
 import { clusterMask, maskArea, resizeMask, ringDetail, toGray, type Box } from './overlay'
-import { LAMA, LamaError, loadLama, runLama } from './lama'
+import { LAMA, LamaError, lamaAllowedByDefault, loadLama, runLama } from './lama'
+import { erodeBinary } from '../lib/morphology'
 import { WM_PROFILES, type WmParams } from './types'
 import { wmClient } from './wmClient'
 
@@ -19,6 +20,8 @@ export interface RestoreResult {
 }
 
 export interface RestoreHooks {
+  /** Allow LaMa in automatic mode. Defaults to a memory-based policy (see `lamaAllowedByDefault`); an explicitly chosen LaMa always runs. */
+  lama?: boolean
   onProgress?: (done: number, total: number, label: string) => void
   onDownload?: (loaded: number, total: number) => void
   signal?: AbortSignal
@@ -55,6 +58,7 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
   const detail = ringDetail(gray, mask, w, h)
   if (detail > 22) warnings.push('The area around the mask has strong edges or fine detail. Inspect the result closely: lines and textures may be invented or misaligned.')
 
+  const lamaOk = params.method !== 'auto' || (hooks.lama ?? lamaAllowedByDefault())
   let lamaSession: Awaited<ReturnType<typeof loadLama>> | null = null
   let lamaCount = 0
   let lamaDown = false
@@ -63,6 +67,10 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
     if (hooks.signal?.aborted) throw new Error('Cancelled')
     const clusterArea = boxArea(mask, c.box, w, h)
     let method = pickMethod(params.method, c.box, params.method === 'auto' ? clusterDetail(gray, mask, c.box, w, h) : 0, clusterArea)
+    // Text strokes are a few pixels wide: Telea fills those cleanly, so LaMa (slow, memory hungry) is kept for solid areas.
+    const thin = params.method === 'auto' && isThin(mask, c.box, w, h, params.expand + 3)
+    if (method === 'lama' && thin) method = 'telea'
+    if (method === 'lama' && !lamaOk) method = clusterArea <= PATCH_MAX_AREA * 2 && params.method === 'auto' ? 'patch' : 'telea'
     if (method === 'lama' && lamaCount >= MAX_LAMA_CLUSTERS) {
       method = 'telea'
       if (!warnings.some((x) => x.includes('LaMa was limited'))) warnings.push(`LaMa was limited to ${MAX_LAMA_CLUSTERS} regions; the rest used Telea.`)
@@ -70,24 +78,28 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
     hooks.onProgress?.(idx, clusters.length, method === 'lama' ? 'Reconstructing with LaMa' : method === 'patch' ? 'Copying real texture' : 'Reconstructing with Telea')
     if (method === 'patch') {
       if (clusterArea <= PATCH_MAX_AREA * 2) {
-        // Structure first (LaMa, else Telea), then real texture on top of it.
+        // Structure first (LaMa for solid areas when allowed, otherwise Telea, which is enough for thin strokes), then real texture on top of it.
         const guide = new Uint8ClampedArray(filled)
-        try {
-          lamaSession ??= await loadLama((l, t) => hooks.onDownload?.(l, t), hooks.signal)
-          await lamaCluster(lamaSession, source, srcCanvas, mask, guide, c.box, profile.context, 0, gray)
-          lamaCount++
-          methods.add('LaMa')
-        } catch (e) {
-          if (hooks.signal?.aborted) throw e
-          if (!(e instanceof LamaError)) throw e
-          warnings.push(`${e.message} The texture fill was guided by Telea instead.`)
+        if (thin || !lamaOk) {
           await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0)
+        } else {
+          try {
+            lamaSession ??= await loadLama((l, t) => hooks.onDownload?.(l, t), hooks.signal)
+            await lamaCluster(lamaSession, source, srcCanvas, mask, guide, c.box, profile.context, 0, gray)
+            lamaCount++
+            methods.add('LaMa')
+          } catch (e) {
+            if (hooks.signal?.aborted) throw e
+            if (!(e instanceof LamaError)) throw e
+            warnings.push(`${e.message} The texture fill was guided by Telea instead.`)
+            await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0)
+          }
         }
         await patchCluster(source, mask, filled, c.box, guide)
         methods.add('Patch')
         continue
       }
-      method = 'lama'
+      method = lamaOk ? 'lama' : 'telea'
     }
     if (method === 'lama') {
       try {
@@ -167,6 +179,18 @@ function clusterDetail(gray: Float32Array, mask: Uint8Array, box: Box, w: number
       m[y * cw + x] = mask[(y0 + y) * w + x0 + x]
     }
   return ringDetail(g, m, cw, ch)
+}
+
+/** True when no part of the cluster is thicker than about `2 × erode` pixels (text strokes, thin lines): eroding it by `erode` leaves nothing. */
+export function isThin(mask: Uint8Array, box: Box, w: number, h: number, erode: number): boolean {
+  const [x0, y0, x1, y1] = cropBounds(box, 2, w, h)
+  const cw = x1 - x0
+  const ch = y1 - y0
+  const local = new Uint8Array(cw * ch)
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) local[y * cw + x] = mask[(y0 + y) * w + x0 + x]
+  const core = erodeBinary(local, cw, ch, erode)
+  for (let i = 0; i < core.length; i++) if (core[i]) return false
+  return true
 }
 
 /** Masked pixels inside a box (one cluster's area, plus any neighbour's pixels that fall in the box). */

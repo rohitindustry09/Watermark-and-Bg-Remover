@@ -157,6 +157,38 @@ On the statue's base the result keeps the rope detail and the rim line instead o
 look of the fill varies with the surrounding texture. The full Thorough run on the statue took 78–81 s on the CPU with the guided fill (59 s with the unguided version; 65–86 s before this change
 when it repainted 5–19 regions; single runs each, not averaged).
 
+### Product photos with brand watermarks (bowl and statue test)
+
+Real case that exposed several problems at once: two catalogue photos with a translucent "DHARMA STATUES" overlay across a brass bowl, an orange "Statues" stamp on a silver statue's base,
+and a logo block with spec text on the backdrop. Everything below was checked on those two images (990×990, CPU path, single runs):
+
+- **Cutout holes and lost parts.** When BiRefNet-lite could not run (it needs WebGPU, and on a GPU that hangs it times out), the app fell back to MODNet, a *portrait* model. On the bowl it cut holes
+  through the shiny interior and left a stray blob; on the statue it dropped both spires on the base. The fallback is now RMBG-1.4 (object-capable, 42 MB int8 build that runs on the CPU in the
+  inference worker, about 8 s per image), which kept the whole bowl and both spires. Its licence is non-commercial, which the on-screen notice says; MODNet remains selectable for portraits.
+- **A broken GPU is remembered.** A hung GPU used to cost a full timeout in every session. The failure is stored (14 days) so later sessions go straight to the CPU model; open the page with
+  `?device=gpu` to try the GPU again. The GPU wait is also 30 s instead of 60 s. (BiRefNet-lite on WebGPU hung on the machine used for these tests as well.)
+- **Stray bits.** Disconnected foreground pieces under 2% of the main subject are dropped (was 0.5%), except pieces within 1.5% of the image size of the subject, so thin tips and detached
+  details survive.
+- **Text the OCR cannot read.** Tesseract returned gibberish for the stylised overlay and the AI watermark detector found nothing. A text *detector* (PP-OCRv4 DBNet, Apache-2.0, 4.7 MB, runs in
+  the inference worker) finds text-shaped marks without reading them: on the bowl it boxed the big translucent "DHARMA STATUES", the red tagline under it, the brand text and the spec lines. Its
+  boxes are refined to the marks' own pixels with two extractors combined (one finds light or dark strokes, one finds local contrast), because a single extractor picked the gold highlights
+  instead of dark red letters. It is selected only with confidence ≥ 90%, strokes that could be extracted, and a width of at least 8% of the image, so a few engraved letters on the product are
+  not touched (Thorough lifts the size rule).
+- **Coloured stamps on a similar-coloured scene.** A saturation detector finds marks that are far more saturated than the rest of the picture (the orange "Statues" stamp on a peach/silver
+  scene) inside the border band, as small sparse shapes, and only if they stand clearly apart from their immediate surroundings. It stays silent on brass or a red wall.
+- **The hue detector was fooled by a reddish wall and the figure's warm highlights** (six false regions, one repainted the figure's head). A hue mark now has to be a wide, short text line and be
+  confirmed by the text detector, or be an unmistakable line with high confidence.
+- **Subject first.** The subject is cut out first; only marks that touch it are repainted. Marks on the backdrop leave with it (7 of 10 on the bowl), which saves a fill each and cannot damage the
+  subject. If you keep a blurred copy of the original background, every mark counts instead. The first cutout is reused after the repaint (re-cutting cost about a third of the time).
+- **LaMa and memory.** LaMa is a 198 MB model that needs well over 1 GB once loaded. On a 5.5 GB PC with about 0.5 GB free, loading it killed the whole browser. Devices that report 4 GB or less now skip
+  it in automatic mode (a switch in the Watermark panel, or `?lama=1` / `?lama=0`, overrides). Text strokes never need it anyway: thin strokes are filled with Telea and real texture patches.
+
+Result on the two photos: the statue loses the "Statues" stamp, the spec lines and the badge and keeps both spires; the bowl loses both lines of the overlay, keeps its whole interior and the figure on
+top, and has no stray blob. An 8-image mixed batch (both photos alternating, CPU path, roughly 0.5 GB of RAM free) finished with no crash in 90 s: 23 s for the first image and 8–11 s for each of the rest (it was about 20 s each before the cutout was reused).
+
+Limits: the text detector can miss small or very faint marks (it missed the faint brand text beside the statue's badge, and the orange stamp, which the saturation detector catches instead), the fill under a mark that crosses fine relief
+(the bowl's ornament) is an estimate, and RMBG-1.4's licence is non-commercial.
+
 ### Responsiveness and hangs
 
 Measured on a 990×990 photo with watermark removal on (single runs on this CPU, so treat the ratios as indicative):
