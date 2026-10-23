@@ -190,6 +190,17 @@ and a logo block with spec text on the backdrop. Everything below was checked on
   instead of the global 3-5 px; a hue-based mark that the text detector already covers is dropped (its blobs spilled over the carving); and a cluster that is *mostly* thin strokes is repaired with
   Telea only (texture patches tile visibly over blurred or glossy relief). Result at 4x zoom: no letters, no ghosts, no red or green remnants, ornament structure intact.
 
+- **Faint haze on marbled backdrops.** A bronze statue photographed on a cloudy white backdrop kept 11% of the image as semi-transparent wisps (about 13% opacity on average, in 436 separate
+  pieces), because the model is unsure about the texture and the opacity curve only clears values under about 14%. `suppressHaze` (`src/lib/matte.ts`, default on, a "Clear faint haze" slider)
+  clears weak opacity away from the subject, and any piece that never becomes solid; everything within 1.5% of the image size of the confident subject is untouched, so soft edges and fine detail stay.
+  On that file: 112,177 semi-transparent pixels became 3,198 (the subject's own soft edge), nothing near the subject changed, and it takes about 0.1 s.
+- **Carving is not text.** On that statue the text detector scored two bands of the carved lotus-petal border at 94% and 91% and the earlier rules would have repainted them. Repeating carving is
+  monochrome while real overlays scored 98-99% or are clearly coloured (35-45% of their pixels), so the default pass now needs a score of at least 97%, or a coloured mask with at least 85%
+  (Thorough still takes 60%). A hue-based mark is only dropped in favour of a text box when that box is itself used.
+
+Not solved: a mark that runs along the very edge of the subject (red "Dharma" and orange "Statues" along the bottom edge of that statue's base) is found only as a low-confidence colour candidate and
+is left alone, because the repair there smeared the base in my test (checked on the cutout only; the original photo was not available). That case needs the original to tune.
+
 Result on the two photos: the statue loses the "Statues" stamp, the spec lines and the badge and keeps both spires; the bowl loses both lines of the overlay, keeps its whole interior and the figure on
 top, and has no stray blob. An 8-image mixed batch (both photos alternating, CPU path, roughly 0.5 GB of RAM free) finished with no crash in 90 s: 23 s for the first image and 8–11 s for each of the rest (it was about 20 s each before the cutout was reused).
 

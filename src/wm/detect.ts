@@ -205,7 +205,7 @@ export async function detectTextOverlays(source: ImageData, opts: { onDownload?:
     // band into "text"; letters are thin, so only features about one stroke wide, and pixels that differ in colour from their surroundings, count.
     const cb = clampBox(d.box, w, h)
     const strokes = extractTextStrokes(source.data, w, h, cb)
-    const seg = strokes ?? { box: cb, mask: new Uint8Array((cb[2] - cb[0]) * (cb[3] - cb[1])).fill(1), coverage: 1 }
+    const seg = strokes ?? { box: cb, mask: new Uint8Array((cb[2] - cb[0]) * (cb[3] - cb[1])).fill(1), coverage: 1, colour: 0 }
     return {
       id: uid(),
       kind: 'textdet' as const,
@@ -217,6 +217,7 @@ export async function detectTextOverlays(source: ImageData, opts: { onDownload?:
       mask: seg.mask,
       angle: 0,
       coverage: seg.coverage,
+      colour: seg.colour,
       grow: strokes ? Math.min(4, Math.max(2, strokeWidthFor(Math.min(seg.box[2] - seg.box[0], seg.box[3] - seg.box[1])))) : undefined, // soft, antialiased edges reach about one stroke width past the extracted pixels
       selected: false,
       needsAuth: false,

@@ -119,6 +119,7 @@ export function RightPanel() {
             {slider('shift', 'Expand / contract', -30, 30, 1, ' px')}
             {slider('smooth', 'Edge smoothness', 0, 12, 1, ' px')}
             {slider('feather', 'Feather', 0, 40, 1, ' px')}
+            {slider('haze', 'Clear faint haze', 0, 0.6, 0.05, '', 'Clears the faint, semi-transparent wisps some models leave on marbled or textured backdrops. Never touches the area right around the subject')}
             {slider('snap', 'Backdrop snap', 0, 1, 0.05, '', 'Uses the real backdrop colour to settle uncertain, partly transparent pixels: fixes ghost-like fading of metal and soft fringes on plain studio backgrounds')}
             {slider('decontaminate', 'Colour decontamination', 0, 1, 0.05, '', 'Removes old background colour from edges (halos)')}
             {slider('islandPercent', 'Drop small specks', 0, 10, 0.1, ' %', 'Removes disconnected fragments smaller than this % of the main subject')}

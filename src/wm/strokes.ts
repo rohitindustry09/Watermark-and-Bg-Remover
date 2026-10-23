@@ -11,6 +11,8 @@ export interface StrokeMask {
   mask: Uint8Array
   /** Share of the box covered. */
   coverage: number
+  /** Share of the mask pixels that were found by a colour cue (red letters on metal) rather than by brightness alone. Carving is monochrome; coloured lettering is not. */
+  colour: number
 }
 
 /** Largest share of the box the strokes may cover; text is sparse, anything denser is relief being mistaken for text. */
@@ -56,6 +58,7 @@ export function extractTextStrokes(rgba: Uint8ClampedArray, w: number, h: number
 
   // 1) Thin bright and thin dark features, each scored against its own Otsu threshold (score 1 = at the threshold).
   const score = new Float32Array(n)
+  const byColour = new Uint8Array(n)
   for (const bright of [true, false]) {
     const th = topHat(lum, cw, ch, radius, bright)
     let max = 0
@@ -109,6 +112,7 @@ export function extractTextStrokes(rgba: Uint8ClampedArray, w: number, h: number
     const redExcess = redness[i] - meanRed[i]
     if ((d > 0.5 && coherence > 0.35) || (coherence < 0.2 && sat[i] > 0.5) || (redExcess > 0.4 && sat[i] > 0.45)) {
       const colourScore = 1.5 + Math.min(1.5, Math.max(d, redExcess))
+      byColour[i] = 1
       if (colourScore > score[i]) score[i] = colourScore
     }
   }
@@ -140,7 +144,11 @@ export function extractTextStrokes(rgba: Uint8ClampedArray, w: number, h: number
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (closed[y * cw + x]) keep[y * cw + x] = 1
   }
   let total = 0
-  for (let i = 0; i < n; i++) total += keep[i]
+  let coloured = 0
+  for (let i = 0; i < n; i++) {
+    total += keep[i]
+    if (keep[i] && byColour[i]) coloured++
+  }
   if (total < 12) return null
-  return { box: [bx0, by0, bx1, by1], mask: keep, coverage: total / n }
+  return { box: [bx0, by0, bx1, by1], mask: keep, coverage: total / n, colour: coloured / total }
 }

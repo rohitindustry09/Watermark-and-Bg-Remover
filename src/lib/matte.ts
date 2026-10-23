@@ -24,6 +24,8 @@ export interface RefineParams {
   decontaminate: number
   /** 0..1: resolve uncertain (partly transparent) pixels by comparing them with the local backdrop colour. */
   snap: number
+  /** Opacity below which pixels away from the subject are cleared (0 = off). Removes the faint haze models leave on textured backdrops. */
+  haze: number
   invert: boolean
 }
 
@@ -39,6 +41,7 @@ export const DEFAULT_PARAMS: RefineParams = {
   feather: 0,
   decontaminate: 0.7,
   snap: 0.6,
+  haze: 0.35,
   invert: false,
 }
 
@@ -350,6 +353,7 @@ export function refineMatte(input: RefineInput): Float32Array {
   }
   a = applyLevels(a, params.strength, params.contrast)
   if (rgba && params.snap > 0) a = snapToBackdrop(a, rgba, w, h, params.snap)
+  a = suppressHaze(a, w, h, params.haze, Math.max(6, Math.round(Math.min(w, h) * 0.015)))
   a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw, Math.round(Math.min(w, h) * 0.015))
   a = applyEdits(a, edits)
   if (params.shift !== 0) a = morph(a, w, h, params.shift, params.shift > 0)
@@ -370,6 +374,31 @@ export function refineMatte(input: RefineInput): Float32Array {
  *  - pushed toward opaque when its colour clearly differs from the backdrop, and toward transparent when it matches it.
  * Confident pixels are never touched, so the silhouette topology is preserved.
  */
+/**
+ * Clears the faint haze a model leaves where it is unsure about a textured or marbled backdrop (measured on a statue photo: 11% of the image was
+ * wisps averaging 13% opacity, in 436 separate pieces). Away from the subject, a pixel is cleared when its opacity is below `threshold`, or when it
+ * belongs to a piece that never becomes solid (peak opacity under 60%). Everything within `nearPx` of the confident subject is left alone, so the
+ * soft edge, fringes of fur or glass, and fine detail are untouched.
+ */
+export function suppressHaze(a: Float32Array, w: number, h: number, threshold: number, nearPx: number): Float32Array {
+  if (threshold <= 0) return a
+  const core = new Uint8Array(a.length)
+  let any = false
+  for (let i = 0; i < a.length; i++)
+    if (a[i] >= 0.6) {
+      core[i] = 1
+      any = true
+    }
+  if (!any) return a // no confident subject: nothing to anchor the cleanup to
+  const zone = dilateBinary(core, w, h, nearPx)
+  const reg = labelRegions(a, w, h, 0.02)
+  const peak = new Float32Array(reg.count)
+  for (let i = 0; i < a.length; i++) if (a[i] > peak[reg.labels[i]]) peak[reg.labels[i]] = a[i]
+  const out = a.slice()
+  for (let i = 0; i < a.length; i++) if (a[i] > 0 && !zone[i] && (a[i] < threshold || (a[i] > 0.02 && peak[reg.labels[i]] < 0.6))) out[i] = 0
+  return out
+}
+
 export function snapToBackdrop(a: Float32Array, rgba: Uint8ClampedArray, w: number, h: number, strength: number): Float32Array {
   if (strength <= 0) return a
   const n = w * h

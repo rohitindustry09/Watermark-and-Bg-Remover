@@ -141,7 +141,10 @@ export async function autoRemoveWatermarks(
   const gray = toGray(source.data, w, h)
   // A hue-based tint mark is easy to fool (a reddish wall, a subject's warm highlights): it is only used for a clear text-line shape with high
   // confidence; where the text detector already covers the text, its stroke mask is used instead (the tint mask spilled over carved relief). Saturation marks are already limited to the border band and sparse logo-like shapes.
-  const textBoxes = regions.filter((r) => r.kind === 'textdet').map((r) => r.box)
+  // Evidence needed before a text-detector box is used in the default pass: repeating carving (a lotus-petal border) scores 89-94% as "text" but is
+  // monochrome, while real overlays scored 98-99% or are clearly coloured.
+  const strongText = (r: Region): boolean => r.confidence >= 97 || ((r.colour ?? 0) >= 0.25 && r.confidence >= 85)
+  const textBoxes = regions.filter((r) => r.kind === 'textdet' && (opts.thorough ? r.confidence >= 60 : strongText(r))).map((r) => r.box)
   const tintTrusted = (r: Region): boolean => {
     if (r.text === 'coloured logo') return true
     const bw = r.box[2] - r.box[0]
@@ -170,7 +173,7 @@ export async function autoRemoveWatermarks(
       // and — unless Thorough — a size typical of a brand mark rather than a few letters on the product.
       const cov = r.coverage ?? 1
       const wide = r.box[2] - r.box[0] >= 0.08 * Math.max(w, h)
-      return { ...r, selected: r.confidence >= (opts.thorough ? 60 : 90) && (opts.thorough || wide) && cov >= 0.04 && cov <= 0.9 }
+      return { ...r, selected: (opts.thorough ? r.confidence >= 60 : strongText(r) && wide) && cov >= 0.04 && cov <= 0.9 }
     }
     // Rotated OCR reads photo texture as short "words" ("ol", "32", "/ WR"); a diagonal watermark has to read as real text to count.
     if (r.angle !== 0 && !plausibleText(r)) return { ...r, selected: false }
