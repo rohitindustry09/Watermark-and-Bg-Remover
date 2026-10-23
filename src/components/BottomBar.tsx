@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react'
 import { useStudio, type Status } from '../state/studio'
+import { estimateEta, formatClock, formatDuration } from '../lib/eta'
 
 const LABEL: Record<Status, string> = {
   queued: 'Queued',
@@ -11,6 +13,37 @@ const LABEL: Record<Status, string> = {
   cancelled: 'Cancelled',
 }
 
+const WORKING: Status[] = ['queued', 'decoding', 'cleaning', 'loading-model', 'running']
+
+/** Time left and the clock time the batch should finish, from how long the finished images took (or the export so far). */
+function TimeLeft() {
+  const { items, procMs, paused, exportProgress } = useStudio()
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 15000)
+    return () => clearInterval(t)
+  }, [])
+  const left = items.filter((i) => WORKING.includes(i.status)).length
+  let label = 'Exporting'
+  let eta = null
+  if (exportProgress && exportProgress.done > 0 && exportProgress.total > 1) {
+    const per = (Date.now() - exportProgress.startedAt) / exportProgress.done
+    eta = estimateEta([per, per], exportProgress.total - exportProgress.done, now)
+  } else if (!exportProgress) {
+    label = 'Processing'
+    eta = estimateEta(procMs, left, now)
+  }
+  if (!exportProgress && left === 0) return null
+  if (!exportProgress && paused) return <span className="ml-2">Paused · {left} left</span>
+  if (!eta) return <span className="ml-2">{label}… estimating time left</span>
+  return (
+    <span className="ml-2" title="Based on how long the finished images took; it sharpens after the first few images.">
+      {label}: about <b className="text-fg">{formatDuration(eta.remainingMs)}</b> left · done around <b className="text-fg">{formatClock(eta.finishAt, now)}</b>
+      {eta.rough && ' (rough)'}
+    </span>
+  )
+}
+
 export function BottomBar() {
   const { items, activeId, openItem, removeItem, retry, device } = useStudio()
   const finished = items.filter((i) => i.status === 'done' || i.status === 'error' || i.status === 'cancelled').length
@@ -20,6 +53,7 @@ export function BottomBar() {
       <div className="flex items-center justify-between px-3 pt-1.5 text-[11.5px] text-muted">
         <span>
           {items.length ? `${finished}/${items.length} processed` : 'No images'}
+          <TimeLeft />
           {items.some((i) => i.status === 'error') && <span className="ml-2 text-danger">{items.filter((i) => i.status === 'error').length} failed</span>}
         </span>
         <span className="font-mono">{device?.note}</span>

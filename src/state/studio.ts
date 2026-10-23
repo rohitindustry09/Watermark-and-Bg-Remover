@@ -103,7 +103,9 @@ interface Studio {
   sessionBusy: boolean
   coverage: number
   lastExport: { name: string; check: AlphaCheck; bytes: number } | null
-  exportProgress: { done: number; total: number } | null
+  exportProgress: { done: number; total: number; startedAt: number } | null
+  /** Milliseconds each finished image took to process, in order, for the time-remaining estimate. */
+  procMs: number[]
   notice: string | null
 
   init(): void
@@ -309,7 +311,9 @@ export const useStudio = create<Studio>((set, get) => {
         if (st.paused) break
         const next = st.items.find((i) => i.status === 'queued')
         if (!next) break
+        const t0 = performance.now()
         await processItem(next.id)
+        if (get().items.find((i) => i.id === next.id)?.status === 'done') set((s) => ({ procMs: [...s.procMs, performance.now() - t0] }))
       }
     } finally {
       pumping = false
@@ -426,6 +430,7 @@ export const useStudio = create<Studio>((set, get) => {
     coverage: 0,
     lastExport: null,
     exportProgress: null,
+    procMs: [],
     notice: null,
 
     init() {
@@ -444,7 +449,10 @@ export const useStudio = create<Studio>((set, get) => {
           }
         } else accepted.push(f)
       }
-      if (!get().items.length) markPlanner.reset()
+      if (!get().items.length) {
+        markPlanner.reset()
+        set({ procMs: [] })
+      }
       const base = get().profile
       const items: Item[] = accepted.map((file) => ({
         id: uid(),
@@ -618,7 +626,7 @@ export const useStudio = create<Studio>((set, get) => {
       const it = active()
       if (!it) return
       try {
-        set({ exportProgress: { done: 0, total: 1 } })
+        set({ exportProgress: { done: 0, total: 1, startedAt: Date.now() } })
         const { blob, check, name } = await renderItem(it.id)
         downloadBlob(blob, name)
         set({ lastExport: { name, check, bytes: blob.size } })
@@ -637,7 +645,8 @@ export const useStudio = create<Studio>((set, get) => {
       }
       const entries: { name: string; blob: Blob }[] = []
       const rows: Record<string, string | number>[] = []
-      set({ exportProgress: { done: 0, total: done.length } })
+      const startedAt = Date.now()
+      set({ exportProgress: { done: 0, total: done.length, startedAt } })
       for (const [n, it] of done.entries()) {
         try {
           const r = await renderOrResume(it)
@@ -646,7 +655,7 @@ export const useStudio = create<Studio>((set, get) => {
         } catch (e) {
           rows.push({ source: it.name, output: '', status: 'failed', bytes: 0, alpha_check: messageOf(e), model_ms: 0, model: '' })
         }
-        set({ exportProgress: { done: n + 1, total: done.length } })
+        set({ exportProgress: { done: n + 1, total: done.length, startedAt } })
       }
       try {
         if (!entries.length) throw new Error('Every image failed to export. See the report.')

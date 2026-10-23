@@ -170,6 +170,10 @@ For a ZIP or a multi-file drop with **Remove watermarks first** on (`src/wm/batc
   output (a mask edit or background change re-renders correctly). If the tab crashes or closes mid-batch, add the same files again and finished steps are reused. Up to 400 entries
   (oldest evicted); a *Clear* link in the Watermark panel empties it. The cutout (matte) step itself is not saved: it is recomputed, which takes seconds per image.
 
+- **Time left.** The footer shows `about 1 h 12 min left · done around 6:45 PM` while images process, and the same for the ZIP export. It uses the median of the recent finished
+  images (the first, which carries model loading, is dropped once there are enough) and is marked *(rough)* until 6 images have finished. It is an estimate: a batch of mixed image
+  sizes or a different watermark mid-way will move it. Checked live on 22 small images (it counted down correctly); the export estimate is unit-tested but I did not watch it live.
+
 Measured on the 990×990 statue photo (single runs on the CPU, with the hidden-pane throttling that makes timings noisy): Thorough detection alone costs about 19 s of rotated OCR plus
 4 s for the AI detector per image, which shared marks skip; the same run on the learned images reused the same 4 regions (mask 3.39% vs 3.30% on a noisy copy). End-to-end image times
 varied between 37 s and 70 s because the LaMa/Patch fill dominates, so I do not claim a precise end-to-end speed-up. Parallel workers are not implemented.
