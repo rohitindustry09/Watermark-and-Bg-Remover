@@ -202,6 +202,10 @@ export function labelRegions(a: Float32Array, w: number, h: number, threshold = 
  * regions fully enclosed by foreground (holes) when requested. Border-touching background is never filled,
  * so intentional gaps that open to the outside (between legs, handles, ...) are preserved.
  */
+/** Mean colour distance from the backdrop below which an enclosed gap is a real gap, and below which a detached piece is backdrop texture. */
+const HOLE_BACKDROP_DIST = 30
+const ISLAND_BACKDROP_DIST = 45
+
 export function cleanRegions(
   a: Float32Array,
   w: number,
@@ -214,6 +218,8 @@ export function cleanRegions(
   evidence?: Float32Array,
   /** Small pieces within this many pixels of the largest region are kept (thin parts, detached tips); only distant specks are dropped. */
   nearPx = 0,
+  /** Backdrop colours: a hole that looks like the backdrop is a real gap (arm and torso), and a detached piece that looks like it is backdrop texture, not an object. */
+  backdrop?: { field: BackdropField; rgba: Uint8ClampedArray },
 ): Float32Array {
   if (islandPercent <= 0 && !fillHoles) return a
   const reg = regions ?? labelRegions(a, w, h)
@@ -239,14 +245,28 @@ export function cleanRegions(
     const zone = dilateBinary(core, w, h, nearPx)
     for (let i = 0; i < a.length; i++) if (zone[i]) nearLargest[reg.labels[i]] = 1
   }
+  // Mean colour distance from the backdrop for every region (only where a backdrop estimate exists nearby).
+  const bgSum = new Float64Array(reg.count)
+  const bgCnt = new Float64Array(reg.count)
+  if (backdrop) {
+    for (let i = 0; i < a.length; i++) {
+      const d = backdropDistance(backdrop.field, backdrop.rgba, i)
+      if (d >= 0) {
+        bgSum[reg.labels[i]] += d
+        bgCnt[reg.labels[i]]++
+      }
+    }
+  }
+  const lookslikeBackdrop = (id: number, limit: number): boolean => bgCnt[id] >= 20 && bgSum[id] / bgCnt[id] < limit
   const holeMean = new Float64Array(reg.count)
   if (fillHoles && evidence) for (let i = 0; i < a.length; i++) if (!reg.isForeground[reg.labels[i]]) holeMean[reg.labels[i]] += evidence[i]
   const out = a.slice()
   for (let i = 0; i < a.length; i++) {
     const id = reg.labels[i]
     if (reg.isForeground[id]) {
-      if (reg.sizes[id] < minFg && !nearLargest[id]) out[i] = 0
-    } else if (fillHoles && !touchesBorder[id] && reg.sizes[id] < largestFg * 0.25 && (!evidence || holeMean[id] / reg.sizes[id] >= 0.3)) {
+      const detached = !nearLargest[id] && reg.sizes[id] < largestFg
+      if ((reg.sizes[id] < minFg && !nearLargest[id]) || (detached && lookslikeBackdrop(id, ISLAND_BACKDROP_DIST))) out[i] = 0
+    } else if (fillHoles && !touchesBorder[id] && reg.sizes[id] < largestFg * 0.25 && (!evidence || holeMean[id] / reg.sizes[id] >= 0.3) && !lookslikeBackdrop(id, HOLE_BACKDROP_DIST)) {
       out[i] = 1
     }
   }
@@ -353,8 +373,10 @@ export function refineMatte(input: RefineInput): Float32Array {
   }
   a = applyLevels(a, params.strength, params.contrast)
   if (rgba && params.snap > 0) a = snapToBackdrop(a, rgba, w, h, params.snap)
+  const field = rgba ? backdropField(a, rgba, w, h) : null
+  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw, Math.round(Math.min(w, h) * 0.015), field && rgba ? { field, rgba } : undefined)
+  // After the speck removal, so the faint halos of removed blobs are left without a solid core to shelter behind.
   a = suppressHaze(a, w, h, params.haze, Math.max(6, Math.round(Math.min(w, h) * 0.015)))
-  a = cleanRegions(a, w, h, params.islandPercent, params.fillHoles, undefined, raw, Math.round(Math.min(w, h) * 0.015))
   a = applyEdits(a, edits)
   if (params.shift !== 0) a = morph(a, w, h, params.shift, params.shift > 0)
   if (params.smooth > 0) a = softBlur(a, w, h, params.smooth)
@@ -382,36 +404,58 @@ export function refineMatte(input: RefineInput): Float32Array {
  */
 export function suppressHaze(a: Float32Array, w: number, h: number, threshold: number, nearPx: number): Float32Array {
   if (threshold <= 0) return a
+  // Anchor: only real objects protect their surroundings. A solid core of a few hundred pixels out in the backdrop (a blotch the model is sure about)
+  // must not shield its own halo, so only pieces of at least 3% of the largest solid piece count.
+  const solid = labelRegions(a, w, h, 0.6)
+  let largest = 0
+  for (let id = 0; id < solid.count; id++) if (solid.isForeground[id] && solid.sizes[id] > largest) largest = solid.sizes[id]
+  if (!largest) return a // no confident subject: nothing to anchor the cleanup to
   const core = new Uint8Array(a.length)
-  let any = false
-  for (let i = 0; i < a.length; i++)
-    if (a[i] >= 0.6) {
-      core[i] = 1
-      any = true
-    }
-  if (!any) return a // no confident subject: nothing to anchor the cleanup to
+  for (let i = 0; i < a.length; i++) {
+    const id = solid.labels[i]
+    if (solid.isForeground[id] && solid.sizes[id] >= largest * 0.03) core[i] = 1
+  }
   const zone = dilateBinary(core, w, h, nearPx)
-  const reg = labelRegions(a, w, h, 0.02)
+  // Pass 1: clear weak opacity away from the subject. This also cuts the faint bridges that tie a blotch to the subject, so that in pass 2 each
+  // blotch is judged on its own rather than as part of one big piece that peaks at 100%.
+  const first = a.slice()
+  for (let i = 0; i < a.length; i++) if (a[i] > 0 && a[i] < threshold && !zone[i]) first[i] = 0
+  // Pass 2: a piece that never becomes solid is not an object.
+  const reg = labelRegions(first, w, h, 0.02)
   const peak = new Float32Array(reg.count)
-  for (let i = 0; i < a.length; i++) if (a[i] > peak[reg.labels[i]]) peak[reg.labels[i]] = a[i]
-  const out = a.slice()
-  for (let i = 0; i < a.length; i++) if (a[i] > 0 && !zone[i] && (a[i] < threshold || (a[i] > 0.02 && peak[reg.labels[i]] < 0.6))) out[i] = 0
-  return out
+  for (let i = 0; i < a.length; i++) if (first[i] > peak[reg.labels[i]]) peak[reg.labels[i]] = first[i]
+  for (let i = 0; i < a.length; i++) if (first[i] > 0.02 && !zone[i] && peak[reg.labels[i]] < 0.6) first[i] = 0
+  return first
 }
 
-export function snapToBackdrop(a: Float32Array, rgba: Uint8ClampedArray, w: number, h: number, strength: number): Float32Array {
-  if (strength <= 0) return a
+/** Smoothed colour of the confident backdrop (pixels with opacity < 2%), normalised by how much backdrop is nearby. */
+export interface BackdropField {
+  est: Float32Array[]
+  den: Float32Array
+}
+
+export function backdropField(a: Float32Array, rgba: Uint8ClampedArray, w: number, h: number): BackdropField | null {
   const n = w * h
+  // Only backdrop connected to the image edge counts: an enclosed gap (arm and torso, a handle) has zero opacity too, but its colour must not
+  // be mistaken for "the backdrop" when deciding what that gap is.
+  const reg = labelRegions(a, w, h, 0.02)
+  const touches = new Uint8Array(reg.count)
+  for (let x = 0; x < w; x++) {
+    touches[reg.labels[x]] = 1
+    touches[reg.labels[(h - 1) * w + x]] = 1
+  }
+  for (let y = 0; y < h; y++) {
+    touches[reg.labels[y * w]] = 1
+    touches[reg.labels[y * w + w - 1]] = 1
+  }
   const wBg = new Float32Array(n)
   let bg = 0
-  let uncertain = 0
-  for (let i = 0; i < n; i++) {
-    if (a[i] < 0.02) {
+  for (let i = 0; i < n; i++)
+    if (a[i] < 0.02 && touches[reg.labels[i]]) {
       wBg[i] = 1
       bg++
-    } else if (a[i] <= 0.98) uncertain++
-  }
-  if (!uncertain || bg < n * 0.03) return a // nothing to resolve, or no clear backdrop to compare with
+    }
+  if (bg < n * 0.03) return null // no clear backdrop to compare with
   const r = Math.max(12, Math.round(Math.min(w, h) * 0.04))
   const den = boxBlur(boxBlur(wBg, w, h, r), w, h, r)
   const est: Float32Array[] = []
@@ -420,22 +464,35 @@ export function snapToBackdrop(a: Float32Array, rgba: Uint8ClampedArray, w: numb
     for (let i = 0; i < n; i++) plane[i] = wBg[i] ? rgba[i * 4 + c] : 0
     est.push(boxBlur(boxBlur(plane, w, h, r), w, h, r))
   }
+  return { est, den }
+}
+
+/** Colour distance of pixel `i` from the backdrop around it, or -1 where there is no backdrop nearby to compare with. */
+export function backdropDistance(f: BackdropField, rgba: Uint8ClampedArray, i: number): number {
+  if (f.den[i] < 0.04) return -1
+  const inv = 1 / f.den[i]
+  const dr = rgba[i * 4] - f.est[0][i] * inv
+  const dg = rgba[i * 4 + 1] - f.est[1][i] * inv
+  const db = rgba[i * 4 + 2] - f.est[2][i] * inv
+  return Math.sqrt(dr * dr + dg * dg + db * db)
+}
+
+export function snapToBackdrop(a: Float32Array, rgba: Uint8ClampedArray, w: number, h: number, strength: number): Float32Array {
+  if (strength <= 0) return a
+  const n = w * h
+  let uncertain = 0
+  for (let i = 0; i < n; i++) if (a[i] >= 0.02 && a[i] <= 0.98) uncertain++
+  if (!uncertain) return a // nothing to resolve
+  const field = backdropField(a, rgba, w, h)
+  if (!field) return a
   const LO = 14
   const HI = 42
   const out = a.slice()
   for (let i = 0; i < n; i++) {
     const v = a[i]
     if (v < 0.02 || v > 0.98) continue
-    let target: number
-    if (den[i] < 0.04) target = 1
-    else {
-      const inv = 1 / den[i]
-      const dr = rgba[i * 4] - est[0][i] * inv
-      const dg = rgba[i * 4 + 1] - est[1][i] * inv
-      const db = rgba[i * 4 + 2] - est[2][i] * inv
-      const d = Math.sqrt(dr * dr + dg * dg + db * db)
-      target = clamp01((d - LO) / (HI - LO))
-    }
+    const d = backdropDistance(field, rgba, i)
+    const target = d < 0 ? 1 : clamp01((d - LO) / (HI - LO))
     out[i] = v + (target - v) * strength
   }
   return out

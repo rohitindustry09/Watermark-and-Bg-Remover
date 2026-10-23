@@ -20,6 +20,8 @@ export interface RestoreResult {
 }
 
 export interface RestoreHooks {
+  /** Pixels (1) that will be discarded anyway, such as the backdrop around a cutout. The repair never borrows colours from them, so a mark on the subject's edge is not filled with pale backdrop. */
+  unknown?: Uint8Array
   /** Allow LaMa in automatic mode. Defaults to a memory-based policy (see `lamaAllowedByDefault`); an explicitly chosen LaMa always runs. */
   lama?: boolean
   onProgress?: (done: number, total: number, label: string) => void
@@ -82,7 +84,7 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
         // Structure first (LaMa for solid areas when allowed, otherwise Telea, which is enough for thin strokes), then real texture on top of it.
         const guide = new Uint8ClampedArray(filled)
         if (thin || !lamaOk) {
-          await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0)
+          await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0, hooks.unknown)
         } else {
           try {
             lamaSession ??= await loadLama((l, t) => hooks.onDownload?.(l, t), hooks.signal)
@@ -93,7 +95,7 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
             if (hooks.signal?.aborted) throw e
             if (!(e instanceof LamaError)) throw e
             warnings.push(`${e.message} The texture fill was guided by Telea instead.`)
-            await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0)
+            await teleaCluster(source, mask, guide, c.box, params.teleaRadius, 0, hooks.unknown)
           }
         }
         await patchCluster(source, mask, filled, c.box, guide)
@@ -117,7 +119,7 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
         method = 'telea'
       }
     }
-    await teleaCluster(source, mask, filled, c.box, params.teleaRadius, params.colorMatch)
+    await teleaCluster(source, mask, filled, c.box, params.teleaRadius, params.colorMatch, hooks.unknown)
     methods.add('Telea')
   }
   if (lamaDown) warnings.push('At least one region was larger than LaMa’s 512 px window and was reconstructed at reduced resolution.')
@@ -133,7 +135,7 @@ function cropBounds(box: Box, pad: number, w: number, h: number): Box {
 }
 
 /** Shifts the reconstructed pixels of one region toward the mean colour of the unmasked ring around it. */
-function matchColour(source: ImageData, mask: Uint8Array, filled: Uint8ClampedArray, box: Box, strength: number): void {
+function matchColour(source: ImageData, mask: Uint8Array, filled: Uint8ClampedArray, box: Box, strength: number, unknown?: Uint8Array): void {
   if (strength <= 0) return
   const { width: w, height: h } = source
   const [x0, y0, x1, y1] = cropBounds(box, 10, w, h)
@@ -152,7 +154,7 @@ function matchColour(source: ImageData, mask: Uint8Array, filled: Uint8ClampedAr
       if (local[y * cw + x]) {
         for (let c = 0; c < 3; c++) fillSum[c] += filled[gi + c]
         fn++
-      } else if (ring[y * cw + x]) {
+      } else if (ring[y * cw + x] && !(unknown && unknown[(y0 + y) * w + x0 + x])) {
         for (let c = 0; c < 3; c++) ringSum[c] += source.data[gi + c]
         rn++
       }
@@ -240,7 +242,7 @@ async function patchCluster(source: ImageData, mask: Uint8Array, filled: Uint8Cl
     }
 }
 
-async function teleaCluster(source: ImageData, mask: Uint8Array, filled: Uint8ClampedArray, box: Box, radius: number, colour: number): Promise<void> {
+async function teleaCluster(source: ImageData, mask: Uint8Array, filled: Uint8ClampedArray, box: Box, radius: number, colour: number, unknown?: Uint8Array): Promise<void> {
   const { width: w, height: h } = source
   const [x0, y0, x1, y1] = cropBounds(box, radius * 4 + 6, w, h)
   const cw = x1 - x0
@@ -253,6 +255,8 @@ async function teleaCluster(source: ImageData, mask: Uint8Array, filled: Uint8Cl
     m.set(mask.subarray((y0 + y) * w + x0, (y0 + y) * w + x1), y * cw)
   }
   const keep = m.slice()
+  // Discarded pixels are treated as unknown too (filled, but never written back), so only the subject's own colours flow into the repair.
+  if (unknown) for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) if (unknown[(y0 + y) * w + x0 + x]) m[y * cw + x] = 1
   const out = await wmClient.telea(rgba, m, cw, ch, radius)
   for (let y = 0; y < ch; y++)
     for (let x = 0; x < cw; x++) {
@@ -263,7 +267,7 @@ async function teleaCluster(source: ImageData, mask: Uint8Array, filled: Uint8Cl
       filled[gi + 1] = out[li + 1]
       filled[gi + 2] = out[li + 2]
     }
-  matchColour(source, mask, filled, box, colour)
+  matchColour(source, mask, filled, box, colour, unknown)
 }
 
 /** Runs LaMa on a square crop around the cluster. Returns true when the crop had to be downscaled below 0.5×. */

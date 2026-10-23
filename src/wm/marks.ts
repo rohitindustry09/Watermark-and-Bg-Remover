@@ -2,6 +2,7 @@
 // Heuristic by design: it looks for pixels that are consistently lighter (or consistently darker) than their
 // surroundings, low in colour saturation, in the places where marks usually sit (corners and top/bottom strips).
 import { boxBlur } from '../lib/matte'
+import { dilateBinary } from '../lib/morphology'
 import { clampBox, closeMask, labelBoxes, resizeMask, segmentOverlay, toGray, type Box } from './overlay'
 
 export interface EdgeMark {
@@ -323,6 +324,7 @@ function growTint(rgba: Uint8ClampedArray, w: number, h: number, dom: number, m:
 
 /** Share of each image side treated as the border band where logos and stamps sit. */
 const SAT_BAND = 0.18
+const SAT_FLOOR = 0.62
 
 /**
  * Coloured marks that the hue test cannot see: an orange logo or stamp on a peach backdrop and a silver subject has nearly the image's own hue
@@ -330,7 +332,7 @@ const SAT_BAND = 0.18
  * the border band only (subjects sit in the middle, so their accents are not touched), that form small, sparse, text- or logo-like blobs are reported.
  * Silent on images whose subject is itself strongly coloured (brass, a red garment): there the percentile is high, so nothing stands out.
  */
-export function detectSatMarks(rgba: Uint8ClampedArray, w: number, h: number): TintMark[] {
+export function detectSatMarks(rgba: Uint8ClampedArray, w: number, h: number, focus?: Uint8Array): TintMark[] {
   if (w < 120 || h < 120) return []
   const n = w * h
   const sat = new Uint8Array(n)
@@ -357,7 +359,9 @@ export function detectSatMarks(rgba: Uint8ClampedArray, w: number, h: number): T
       break
     }
   }
-  const thr = Math.max(0.45 * 255, p95 + 0.12 * 255)
+  // Absolute floor 62%: a warm subject's own highlights sit around 50-55% (measured on copper and bronze statues) and must not count; printed logos and
+  // stamps use vivid colour.
+  const thr = Math.max(SAT_FLOOR * 255, p95 + 0.12 * 255)
   if (thr > 250) return []
   const bx = Math.round(w * SAT_BAND)
   const by = Math.round(h * SAT_BAND)
@@ -390,23 +394,42 @@ export function detectSatMarks(rgba: Uint8ClampedArray, w: number, h: number): T
     let markSat = 0
     let ringSat = 0
     let ringN = 0
+    // With a subject mask, a mark is compared only with surroundings of its own kind: the copper crown of a statue on a grey backdrop is far more
+    // saturated than the backdrop but not than the rest of the statue, so it is not a stamp; an orange stamp on a silver base is.
+    let onSubject = 0
+    if (focus) for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (off[y * w + x] && focus[y * w + x]) onSubject++
+    const markOnSubject = focus ? onSubject * 2 > cnt : false
     for (let y = ring[1]; y < ring[3]; y++)
       for (let x = ring[0]; x < ring[2]; x++) {
         const i = y * w + x
+        if (focus && (focus[i] === 1) !== markOnSubject) continue
         if (off[i]) markSat += sat[i]
         else if (!joined[i]) {
           ringSat += sat[i]
           ringN++
         }
       }
-    if (!ringN || markSat / cnt / 255 - ringSat / ringN / 255 < 0.25) continue
+    // A stamp on the subject must stand out clearly from the rest of the subject, but less than the backdrop rule would suggest: the subject's own warm
+    // highlights are excluded by the absolute saturation floor, not by this contrast.
+    const needed = markOnSubject ? 0.35 : 0.25
+    if (!ringN || markSat / cnt / 255 - ringSat / ringN / 255 < needed) continue
     const box = clampBox([x0 - 4, y0 - 4, x1 + 4, y1 + 4], w, h)
     const mw = box[2] - box[0]
     const mask = new Uint8Array(mw * (box[3] - box[1]))
     for (let y = box[1]; y < box[3]; y++) for (let x = box[0]; x < box[2]; x++) if (off[y * w + x]) mask[(y - box[1]) * mw + (x - box[0])] = 1
+    // The vivid floor finds the letters' cores; their anti-aliased edges are less saturated and would stay behind as a coloured fringe. Add pixels within
+    // 2 px of a core that are clearly more saturated than the surface around the mark (never further out, so the subject itself is not swallowed).
+    const bh2 = box[3] - box[1]
+    const halo = dilateBinary(mask, mw, bh2, 2)
+    const fringeFloor = (ringSat / ringN) + 0.12 * 255
+    for (let y = box[1]; y < box[3]; y++)
+      for (let x = box[0]; x < box[2]; x++) {
+        const li = (y - box[1]) * mw + (x - box[0])
+        if (!mask[li] && halo[li] && sat[y * w + x] >= fringeFloor) mask[li] = 1
+      }
     out.push({
       box,
-      mask: closeMask(mask, mw, box[3] - box[1], 3),
+      mask: closeMask(mask, mw, bh2, 3),
       score: Math.min(1, 0.45 + fill),
       via: 'sat',
       hue: 0,

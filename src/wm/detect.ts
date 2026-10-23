@@ -227,8 +227,8 @@ export async function detectTextOverlays(source: ImageData, opts: { onDownload?:
 }
 
 /** Coloured (tinted) watermark candidates in single-hue-family images. Pure pixel analysis, no model download. */
-export function detectTint(source: ImageData): Region[] {
-  return [...detectTintMarks(source.data, source.width, source.height), ...detectSatMarks(source.data, source.width, source.height)].map((t) => ({
+export function detectTint(source: ImageData, focus?: Uint8Array): Region[] {
+  return [...detectTintMarks(source.data, source.width, source.height), ...detectSatMarks(source.data, source.width, source.height, focus)].map((t) => ({
     id: uid(),
     kind: 'tint' as const,
     text: t.via === 'sat' ? 'coloured logo' : 'coloured watermark',

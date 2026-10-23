@@ -36,6 +36,29 @@ describe('faint haze away from the subject', () => {
     expect(out[100 * W + 100]).toBeCloseTo(0.95, 5)
   })
 
+  it('removes a mid-opacity blotch that is tied to the subject only by a faint bridge', () => {
+    const a = matte((m) => {
+      fillRect(m, 85, 58, 100, 62, 0.2) // faint bridge leaving the subject's right edge (x 80+) towards the blotch
+      fillRect(m, 100, 50, 112, 70, 0.45) // blotch: stronger than the threshold but never solid
+    })
+    const out = suppressHaze(a, W, H, 0.35, 8)
+    expect(out[60 * W + 106]).toBe(0)
+    expect(out[60 * W + 92]).toBe(0)
+    expect(out[60 * W + 60]).toBe(1)
+  })
+
+  it('a small solid core far from the subject does not shelter its own halo (speck removal, then haze)', () => {
+    const a = matte((m) => {
+      fillRect(m, 5, 5, 25, 25, 0.45) // halo
+      fillRect(m, 12, 12, 16, 16, 0.95) // a small, sure blotch inside it: 16 px against a 1,600 px subject
+    })
+    const params = { ...DEFAULT_PARAMS, detail: 0, strength: 0, contrast: 0, haze: 0.35, islandPercent: 2 }
+    const out = refineMatte({ raw: a, guide: new Float32Array(W * H).fill(0.5), w: W, h: H, params, edits: new Uint8Array(W * H) })
+    expect(out[8 * W + 8]).toBe(0) // halo gone
+    expect(out[14 * W + 14]).toBe(0) // core gone
+    expect(out[60 * W + 60]).toBeGreaterThan(0.9)
+  })
+
   it('leaves the soft edge and anything near the subject untouched', () => {
     const a = matte((m) => fillRect(m, 82, 40, 86, 80, 0.15)) // faint fringe 2 px from the subject
     const out = suppressHaze(a, W, H, 0.35, 8)

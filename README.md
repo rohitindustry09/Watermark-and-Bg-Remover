@@ -198,6 +198,25 @@ and a logo block with spec text on the backdrop. Everything below was checked on
   monochrome while real overlays scored 98-99% or are clearly coloured (35-45% of their pixels), so the default pass now needs a score of at least 97%, or a coloured mask with at least 85%
   (Thorough still takes 60%). A hue-based mark is only dropped in favour of a text box when that box is itself used.
 
+#### Third pass: a bronze statue on a grey marbled backdrop (original photo available)
+
+Run on the original, the earlier build still showed blotches of backdrop, a pale patch in the gap between the arm and the torso, a smeared crown and base, and the watermark on the base. Causes found by
+measuring, and what changed:
+
+- **Blotches.** The model's raw output was noisy on the marbled backdrop (about 47,000 pixels above 50% on the left half). The "near the subject" zone that protects soft edges was built from every solid
+  pixel, so each blotch's solid core sheltered its own halo. It is now anchored to real objects only (pieces of at least 3% of the largest), the weak bridges tying a blotch to the subject are cleared first,
+  and speck removal runs before the haze step. Faint pixels on the left: 70,574 without the rule, 13,421 with the first version, 0 now.
+- **Holes and gaps.** Hole filling treated any enclosed gap the model was unsure about as part of the object, which is right for a glossy bowl interior but wrong for the gap between an arm and a torso. A
+  gap whose colour matches the backdrop around the subject now stays transparent, and a large detached piece that looks like the backdrop is removed. The backdrop colour comes only from background connected
+  to the image edge (an enclosed gap has zero opacity too and must not define "the backdrop").
+- **Smeared crown and base.** The saturation detector had an absolute floor of 45% and the statue's own warm highlights sit around 50-55%, so they were reported as "logos" and repainted. The floor is now
+  62%, a mark on the subject is compared only with the rest of the subject, and its mask gets a thin band for the letters' anti-aliased edges. With that, the bronze statue's real watermark along the base
+  (red-orange "Dharma Statues") is found, which it was not before.
+- **Repair borrowing backdrop colour.** When the subject is known, the Telea repair treats the backdrop as unknown, so a mark at the subject's edge is not filled with pale backdrop.
+
+Remaining on that photo: the repair along the base's bottom edge is soft and slightly smudged, a strip of grey backdrop under the base is kept by the cutout itself, and on the silver statue a faint orange
+smudge of the stamp can remain. Two cues I tried to tell a real stamp on a metal subject from the subject's own highlights (shape thinness, contrast) did not separate them; only the saturation floor did.
+
 Not solved: a mark that runs along the very edge of the subject (red "Dharma" and orange "Statues" along the bottom edge of that statue's base) is found only as a low-confidence colour candidate and
 is left alone, because the repair there smeared the base in my test (checked on the cutout only; the original photo was not available). That case needs the original to tune.
 

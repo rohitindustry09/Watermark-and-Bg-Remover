@@ -101,7 +101,7 @@ export async function autoRemoveWatermarks(
     const verified = sharedMarks.map((m) => verifyMark(g, w, h, m))
     if (verified.every((v) => v.ok)) {
       for (const v of verified) sharedIds.add(v.region!.id)
-      regions = [...verified.map((v) => v.region!), ...detectTint(source)]
+      regions = [...verified.map((v) => v.region!), ...detectTint(source, opts.focus)]
       sharedUsed = true
     } else opts.planner?.miss(key)
   }
@@ -132,7 +132,7 @@ export async function autoRemoveWatermarks(
         detectorWarning = [detectorWarning, `The AI watermark detector could not run (${e instanceof Error ? e.message : String(e)}).`].filter(Boolean).join(' ')
       }
     }
-    regions.push(...detectTint(source))
+    regions.push(...detectTint(source, opts.focus))
   }
   const protectedText: string[] = []
   // The corner/edge statistics detector (wm/marks.ts `detectEdgeMarks`) is deliberately NOT used here: it cannot tell a logo from a bright part of
@@ -228,7 +228,9 @@ export async function autoRemoveWatermarks(
   const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
   const params = { ...DEFAULT_WM_PARAMS, method: 'auto' as const, expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
   const mask = buildMask(chosen, [], w, h, params)
-  const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload, lama: opts.useLama })
+  // With a subject mask, the backdrop is discarded afterwards, so the repair is told not to borrow its colours (a mark on the subject's edge was filled with pale backdrop).
+  const unknown = opts.focus ? dilateBinary(opts.focus, w, h, 3).map((v) => 1 - v) : undefined
+  const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload, lama: opts.useLama, unknown })
   report.methods = result.methods
   report.warnings = [...report.warnings, ...result.warnings]
   report.ms = performance.now() - t0
