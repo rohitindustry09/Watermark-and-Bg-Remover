@@ -1,6 +1,5 @@
-import * as ort from 'onnxruntime-web'
-import '../lib/engine' // side effect: configures the ORT WASM paths and thread count shared with the segmentation models
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
+import { InferError, inferClient, type InferSession } from '../lib/inferClient'
 
 export const LAMA = {
   name: 'LaMa (big-lama)',
@@ -26,22 +25,21 @@ export class LamaError extends Error {
   }
 }
 
-const RUN_TIMEOUT_MS = 600_000
+/** One 512×512 fill takes seconds to ~90 s on a slow CPU; past this the run is stopped (the worker is restarted) instead of hanging the batch. */
+const RUN_TIMEOUT_MS = 240_000
 
-let loading: Promise<ort.InferenceSession> | null = null
+let loading: Promise<InferSession> | null = null
+inferClient.onReset(() => {
+  loading = null
+})
 
-/**
- * LaMa uses FFT ops that the WebGPU provider handles poorly, so the CPU (WASM, multi-threaded) path is the default.
- * Add `?lama=gpu` to the page URL to try WebGPU.
- */
-export function loadLama(onDownload?: ProgressFn, signal?: AbortSignal): Promise<ort.InferenceSession> {
+/** LaMa runs on the CPU in the inference worker: its FFT ops are poorly supported by the WebGPU provider, and a worker keeps the page responsive. */
+export function loadLama(onDownload?: ProgressFn, signal?: AbortSignal): Promise<InferSession> {
   loading ??= (async () => {
     const bytes = await loadModelBytes(lamaUrl, onDownload, signal)
-    const wantGpu = new URLSearchParams(globalThis.location?.search ?? '').get('lama') === 'gpu'
     try {
-      return await ort.InferenceSession.create(bytes, { executionProviders: [wantGpu ? 'webgpu' : 'wasm'], graphOptimizationLevel: 'all' })
+      return await inferClient.create(bytes, 240_000, signal)
     } catch (e) {
-      if (wantGpu) return ort.InferenceSession.create(bytes, { executionProviders: ['wasm'] })
       const msg = (e as Error)?.message ?? String(e)
       throw new LamaError(/memory|alloc/i.test(msg) ? 'Not enough memory to load the LaMa model.' : `LaMa could not be initialised: ${msg}`, /memory|alloc/i.test(msg) ? 'oom' : 'unavailable')
     }
@@ -56,23 +54,13 @@ export function loadLama(onDownload?: ProgressFn, signal?: AbortSignal): Promise
  * Runs LaMa on one 512×512 crop. `image` is CHW float 0..1, `mask` is 512×512 with 1 = reconstruct.
  * Returns CHW float in 0..1.
  */
-export async function runLama(session: ort.InferenceSession, image: Float32Array, mask: Float32Array): Promise<Float32Array> {
+export async function runLama(session: InferSession, image: Float32Array, mask: Float32Array): Promise<Float32Array> {
   const n = LAMA.size
   const imgName = session.inputNames.find((k) => !/mask/i.test(k)) ?? session.inputNames[0]
   const maskName = session.inputNames.find((k) => /mask/i.test(k)) ?? session.inputNames[1]
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, rej) => {
-    timer = setTimeout(() => rej(new LamaError('LaMa timed out.', 'timeout')), RUN_TIMEOUT_MS)
-  })
   try {
-    const out = await Promise.race([
-      session.run({
-        [imgName]: new ort.Tensor('float32', image, [1, 3, n, n]),
-        [maskName]: new ort.Tensor('float32', mask, [1, 1, n, n]),
-      }),
-      timeout,
-    ])
-    const data = (await out[session.outputNames[0]].getData()) as Float32Array
+    const out = await session.run({ [imgName]: { data: image, dims: [1, 3, n, n] }, [maskName]: { data: mask, dims: [1, 1, n, n] } }, RUN_TIMEOUT_MS)
+    const data = out[session.outputNames[0]].data
     let max = 0
     for (let i = 0; i < data.length; i += 97) if (data[i] > max) max = data[i]
     const scale = max > 2 ? 1 / 255 : 1 // the Carve export returns 0..255
@@ -81,9 +69,8 @@ export async function runLama(session: ort.InferenceSession, image: Float32Array
     return res
   } catch (e) {
     if (e instanceof LamaError) throw e
+    if (e instanceof InferError && e.code === 'timeout') throw new LamaError('LaMa timed out and was stopped.', 'timeout')
     const msg = (e as Error)?.message ?? String(e)
     throw new LamaError(/memory|alloc/i.test(msg) ? 'Ran out of memory while running LaMa.' : `LaMa failed: ${msg}`, /memory|alloc/i.test(msg) ? 'oom' : 'inference')
-  } finally {
-    clearTimeout(timer)
   }
 }

@@ -1,6 +1,7 @@
 // Pure pixel analysis for watermark work: overlay segmentation, mask operations, template matching,
 // classification heuristics and image-quality metrics. No DOM; unit-tested under Node.
 import { boxBlur, labelRegions, morph } from '../lib/matte'
+import { dilateBinary, erodeBinary } from '../lib/morphology'
 
 export type Box = [number, number, number, number] // x0, y0, x1, y1 (exclusive end)
 
@@ -136,21 +137,15 @@ function toPlane(m: Uint8Array): Float32Array {
   return f
 }
 
-function fromPlane(f: Float32Array): Uint8Array {
-  const m = new Uint8Array(f.length)
-  for (let i = 0; i < f.length; i++) m[i] = f[i] > 0.5 ? 1 : 0
-  return m
-}
-
 export function closeMask(m: Uint8Array, w: number, h: number, px: number): Uint8Array {
   if (px <= 0) return m
-  return fromPlane(morph(morph(toPlane(m), w, h, px, true), w, h, px, false))
+  return erodeBinary(dilateBinary(m, w, h, px), w, h, px)
 }
 
 /** Grow (px > 0) or shrink (px < 0) a binary mask. */
 export function resizeMask(m: Uint8Array, w: number, h: number, px: number): Uint8Array {
   if (px === 0) return m
-  return fromPlane(morph(toPlane(m), w, h, px, px > 0))
+  return px > 0 ? dilateBinary(m, w, h, px) : erodeBinary(m, w, h, -px)
 }
 
 /** Fills enclosed unmasked holes up to `maxArea` pixels (e.g. the inside of an "O"). Holes open to the border are untouched. */

@@ -63,6 +63,8 @@ export type WmStatus = 'queued' | 'decoding' | 'detecting' | 'ready' | 'restorin
 export interface WmItem {
   id: string
   name: string
+  /** Folder the image came from inside the ZIP or picked/dropped folder ('' = top level); the export ZIP recreates it. */
+  dir: string
   file: File
   status: WmStatus
   error?: string

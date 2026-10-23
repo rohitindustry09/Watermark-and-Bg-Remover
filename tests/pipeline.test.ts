@@ -4,7 +4,8 @@ import { alphaBounds, buildCutout, computePlacement, outToImage, DEFAULT_LAYOUT,
 import { clientToImage, emptyHistory, pushOp, redo, renderEdits, undo } from '../src/lib/ops'
 import { modelInputSize, toTensorData } from '../src/lib/preprocess'
 import { MODELS } from '../src/lib/models'
-import { csvReport, extractImages, safeEntryName, ZipError } from '../src/lib/zip'
+import { csvReport, extractImages, ZipError } from '../src/lib/zip'
+import { dirOf, safePath } from '../src/lib/paths'
 import { exportFilename, pngColorType } from '../src/lib/exporter'
 import { fitWithin, LIMITS } from '../src/lib/decode'
 
@@ -131,17 +132,18 @@ describe('model preprocessing', () => {
 
 describe('zip safety', () => {
   it('rejects traversal and absolute entry names', () => {
-    expect(safeEntryName('../../etc/passwd.png')).toBeNull()
-    expect(safeEntryName('/abs/a.png')).toBeNull()
-    expect(safeEntryName('C:\\x\\a.png')).toBeNull()
-    expect(safeEntryName('dir/sub/a.png')).toBe('a.png')
-    expect(safeEntryName('.hidden.png')).toBeNull()
+    expect(safePath('../../etc/passwd.png')).toBeNull()
+    expect(safePath('/abs/a.png')).toBeNull()
+    expect(safePath('C:\\x\\a.png')).toBeNull()
+    expect(safePath('dir/sub/a.png')).toBe('dir/sub/a.png')
+    expect(safePath('.hidden.png')).toBeNull()
   })
   it('extracts only safe image entries', async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
     const zip = zipSync({ 'a.png': png, 'folder/b.jpg': png, '../evil.png': png, 'notes.txt': new Uint8Array([1]) })
     const files = await extractImages(new File([zip as BlobPart], 'x.zip'))
     expect(files.map((f) => f.name).sort()).toEqual(['a.png', 'b.jpg'])
+    expect(files.find((f) => f.name === 'b.jpg') && dirOf(files.find((f) => f.name === 'b.jpg')!)).toBe('folder')
   })
   it('refuses archives without images and archives over the entry cap', async () => {
     await expect(extractImages(new File([zipSync({ 'a.txt': new Uint8Array([1]) }) as BlobPart], 'x.zip'))).rejects.toBeInstanceOf(ZipError)

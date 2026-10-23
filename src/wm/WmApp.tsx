@@ -3,6 +3,7 @@ import { getWmSession, useWm } from './store'
 import { WmWorkspace } from './WmWorkspace'
 import { WmBottom, WmLeft, WmRight } from './WmPanels'
 import { Btn, Segmented } from '../components/ui'
+import { collectDropped } from '../lib/paths'
 
 export type Mode = 'bg' | 'wm'
 
@@ -78,7 +79,9 @@ export function WmApp({ mode, onMode }: { mode: Mode; onMode: (m: Mode) => void 
       onDrop={(e) => {
         e.preventDefault()
         setDragging(false)
-        if (e.dataTransfer.files.length) void s.addFiles([...e.dataTransfer.files])
+        void collectDropped(e.dataTransfer).then((files) => {
+          if (files.length) void s.addFiles(files)
+        })
       }}
     >
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-2.5">

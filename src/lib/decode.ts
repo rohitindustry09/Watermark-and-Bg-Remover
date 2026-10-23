@@ -1,7 +1,7 @@
 export const LIMITS = {
   maxFileBytes: 60 * 1024 * 1024,
   maxPixels: 80_000_000,
-  maxZipEntries: 200,
+  maxZipEntries: 2000,
   maxZipTotalBytes: 500 * 1024 * 1024,
 }
 

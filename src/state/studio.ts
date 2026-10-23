@@ -15,7 +15,9 @@ import {
 } from '../lib/composite'
 import { emptyHistory, pushOp, redo as redoH, undo as undoH, type History, type Op } from '../lib/ops'
 import { ExportError, downloadBlob, encodeCanvas, exportFilename, validateExport, type AlphaCheck, type ExportFormat } from '../lib/exporter'
-import { buildZip, csvReport, extractImages } from '../lib/zip'
+import { buildZip, csvReport, expandInputs } from '../lib/zip'
+import { dirOf, joinPath } from '../lib/paths'
+import { makeGate } from '../lib/throttle'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
 import { SharedMarkPlanner } from '../wm/batch'
 import { fingerprint, resume, settingsHash } from '../lib/resume'
@@ -40,6 +42,8 @@ export type CompareMode = 'result' | 'original' | 'split'
 export interface Item {
   id: string
   name: string
+  /** Folder the image came from inside the ZIP or picked/dropped folder ('' = top level); the export ZIP recreates it. */
+  dir: string
   file: File
   /** The untouched upload, kept when watermark removal replaced `file` with a cleaned PNG. */
   origFile?: File
@@ -166,6 +170,10 @@ function messageOfInner(e: unknown): string {
 
 /** Learns watermark positions that recur across same-size images of a batch, so later images skip OCR and the detector. */
 const markPlanner = new SharedMarkPlanner(3)
+/** Model downloads report per network chunk; showing every one re-renders the whole UI hundreds of times a second. */
+const downloadGate = makeGate(150)
+/** Upper bound for the watermark stage of one image (detection plus every fill), so one bad image cannot hold up a whole batch. */
+const WATERMARK_STAGE_TIMEOUT_MS = 8 * 60_000
 
 const mapItem = (items: Item[], id: string, fn: (i: Item) => Item): Item[] => items.map((i) => (i.id === id ? fn(i) : i))
 
@@ -213,7 +221,7 @@ export const useStudio = create<Studio>((set, get) => {
         patchItem(id, { status: 'cleaning' })
         const quick = (warning: string): AutoWatermarkReport => ({ found: 0, removed: 0, skipped: [], methods: [], warnings: [warning], ms: 0 })
         try {
-          const wmKey = `${await fingerprint(upload)}|${settingsHash({ t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, e: maxEdge })}`
+          const wmKey = `${item.dir}|${await fingerprint(upload)}|${settingsHash({ t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, e: maxEdge })}`
           const saved = await resume.get('wm', wmKey)
           if (saved) {
             // Finished earlier (this run or a previous session): an empty blob means "no watermark found".
@@ -223,7 +231,22 @@ export const useStudio = create<Studio>((set, get) => {
               patchItem(id, { file: cleaned, origFile: upload, watermark: quick('Watermark removal restored from saved progress.') })
             } else patchItem(id, { file: upload, origFile: undefined, watermark: quick('No watermark found (saved result).') })
           } else {
-            const { result, report } = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, planner: markPlanner, signal, onDownload: (loaded, total) => set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
+            // The stage is bounded: if it overruns, it is cancelled and the image continues without watermark removal instead of stalling the batch.
+            const stage = new AbortController()
+            const onAbort = () => stage.abort()
+            signal.addEventListener('abort', onAbort)
+            const stageTimer = setTimeout(() => stage.abort(), WATERMARK_STAGE_TIMEOUT_MS)
+            let outcome: Awaited<ReturnType<typeof autoRemoveWatermarks>>
+            try {
+              outcome = await autoRemoveWatermarks(source, { thorough: get().wmThorough, includeOwnership: get().wmIncludeOwnership, useDetector: get().wmUseDetector, planner: markPlanner, signal: stage.signal, onDownload: (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: 'LaMa inpainting', loaded, total } }) })
+            } catch (e) {
+              if (stage.signal.aborted && !signal.aborted) throw new Error(`Watermark removal took longer than ${WATERMARK_STAGE_TIMEOUT_MS / 60000} minutes and was skipped for this image.`)
+              throw e
+            } finally {
+              clearTimeout(stageTimer)
+              signal.removeEventListener('abort', onAbort)
+            }
+            const { result, report } = outcome
             set({ modelProgress: null })
             if (result) {
               const full = info.downscaled ? (await decodeFile(upload, Number.POSITIVE_INFINITY)).source : source
@@ -256,7 +279,7 @@ export const useStudio = create<Studio>((set, get) => {
           modelId = 'modnet'
           set({ notice: `${MODELS[get().modelId].name} needs WebGPU, so MODNet (portrait) was used on the CPU instead. Pick another model in the sidebar if the result is poor.` })
         }
-        const model = await loadModel(modelId, (loaded, total) => set({ modelProgress: { label: MODELS[modelId].name, loaded, total } }), signal)
+        const model = await loadModel(modelId, (loaded, total) => downloadGate(loaded >= total) && set({ modelProgress: { label: MODELS[modelId].name, loaded, total } }), signal)
         set({ modelProgress: null })
         if (signal.aborted) throw new EngineError('Cancelled', 'cancelled')
         patchItem(id, { status: 'running' })
@@ -380,7 +403,7 @@ export const useStudio = create<Studio>((set, get) => {
     let key: string | null = null
     try {
       const { progress: _p, lastNote: _n, ...enhance } = useEnhance.getState() as unknown as Record<string, unknown>
-      key = `${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership] })}`
+      key = `${it.dir}|${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership] })}`
       const saved = await resume.get('export', key)
       if (saved?.meta) {
         const m = JSON.parse(saved.meta) as { name: string; check: AlphaCheck }
@@ -438,17 +461,7 @@ export const useStudio = create<Studio>((set, get) => {
     },
 
     async addFiles(files) {
-      const accepted: File[] = []
-      const problems: string[] = []
-      for (const f of files) {
-        if (/\.zip$/i.test(f.name) || f.type === 'application/zip') {
-          try {
-            accepted.push(...(await extractImages(f)))
-          } catch (e) {
-            problems.push(`${f.name}: ${messageOf(e)}`)
-          }
-        } else accepted.push(f)
-      }
+      const { files: accepted, problems } = await expandInputs(files)
       if (!get().items.length) {
         markPlanner.reset()
         set({ procMs: [] })
@@ -457,6 +470,7 @@ export const useStudio = create<Studio>((set, get) => {
       const items: Item[] = accepted.map((file) => ({
         id: uid(),
         name: file.name,
+        dir: dirOf(file),
         file,
         status: 'queued',
         params: { ...DEFAULT_PARAMS, detail: PROFILES[base].detail },
@@ -650,10 +664,10 @@ export const useStudio = create<Studio>((set, get) => {
       for (const [n, it] of done.entries()) {
         try {
           const r = await renderOrResume(it)
-          entries.push({ name: r.name, blob: r.blob })
-          rows.push({ source: it.name, output: r.name, status: 'ok', bytes: r.blob.size, alpha_check: r.check.detail, model_ms: Math.round(it.timing?.ms ?? 0), model: it.timing?.model ?? '' })
+          entries.push({ name: joinPath(it.dir, r.name), blob: r.blob })
+          rows.push({ source: joinPath(it.dir, it.name), output: joinPath(it.dir, r.name), status: 'ok', bytes: r.blob.size, alpha_check: r.check.detail, model_ms: Math.round(it.timing?.ms ?? 0), model: it.timing?.model ?? '' })
         } catch (e) {
-          rows.push({ source: it.name, output: '', status: 'failed', bytes: 0, alpha_check: messageOf(e), model_ms: 0, model: '' })
+          rows.push({ source: joinPath(it.dir, it.name), output: '', status: 'failed', bytes: 0, alpha_check: messageOf(e), model_ms: 0, model: '' })
         }
         set({ exportProgress: { done: n + 1, total: done.length, startedAt } })
       }

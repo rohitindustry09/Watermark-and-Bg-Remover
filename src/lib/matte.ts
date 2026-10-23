@@ -1,5 +1,6 @@
 // Pure alpha-matte operations on Float32Array planes (values 0..1, row-major, w*h).
 // No DOM access, so everything here is unit-testable under Node.
+import { morphGray } from './morphology'
 
 export interface RefineParams {
   /** Guided-filter detail recovery, 0..1 (snaps the matte to real image edges). */
@@ -135,34 +136,8 @@ export function guidedFilter(
   return q
 }
 
-/** Morphological grow/shrink by `radius` px using alternating cross and 3x3-square steps (≈ octagonal disc). */
-export function morph(src: Float32Array, w: number, h: number, radius: number, grow: boolean): Float32Array {
-  let cur = src.slice()
-  const steps = Math.round(Math.abs(radius))
-  if (steps === 0) return cur
-  let nxt = new Float32Array(w * h)
-  const pick = grow ? Math.max : Math.min
-  for (let s = 0; s < steps; s++) {
-    const square = s % 2 === 1
-    for (let y = 0; y < h; y++) {
-      const y0 = y > 0 ? y - 1 : y
-      const y1 = y < h - 1 ? y + 1 : y
-      for (let x = 0; x < w; x++) {
-        const x0 = x > 0 ? x - 1 : x
-        const x1 = x < w - 1 ? x + 1 : x
-        let v = pick(cur[y * w + x], pick(cur[y * w + x0], cur[y * w + x1]))
-        v = pick(v, pick(cur[y0 * w + x], cur[y1 * w + x]))
-        if (square) {
-          v = pick(v, pick(cur[y0 * w + x0], cur[y0 * w + x1]))
-          v = pick(v, pick(cur[y1 * w + x0], cur[y1 * w + x1]))
-        }
-        nxt[y * w + x] = v
-      }
-    }
-    ;[cur, nxt] = [nxt, cur]
-  }
-  return cur
-}
+/** Morphological grow/shrink by `radius` px (≈ octagonal disc). See lib/morphology.ts for the fast, equivalent implementation. */
+export const morph = (src: Float32Array, w: number, h: number, radius: number, grow: boolean): Float32Array => morphGray(src, w, h, radius, grow)
 
 /** Shift the alpha curve (strength) and steepen it (contrast). */
 export function applyLevels(a: Float32Array, strength: number, contrast: number): Float32Array {

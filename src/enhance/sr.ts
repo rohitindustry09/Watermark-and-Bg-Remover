@@ -1,5 +1,5 @@
 import * as ort from 'onnxruntime-web'
-import '../lib/engine' // side effect: ORT WASM paths / threads shared with the other models
+import '../lib/ortEnv' // side effect: ORT WASM paths / threads shared with the other models
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
 
 /**

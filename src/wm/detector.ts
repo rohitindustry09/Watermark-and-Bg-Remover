@@ -1,6 +1,5 @@
-import * as ort from 'onnxruntime-web'
-import '../lib/engine' // side effect: ORT WASM paths / threads shared with the other models
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
+import { inferClient, type InferSession } from '../lib/inferClient'
 import type { Box } from './overlay'
 
 /**
@@ -19,12 +18,15 @@ export const WATERMARK_DETECTOR = {
 const HOST = (import.meta.env?.VITE_MODEL_HOST as string | undefined) ?? 'https://huggingface.co'
 export const detectorUrl = `${HOST}/${WATERMARK_DETECTOR.repo}/resolve/main/${WATERMARK_DETECTOR.file}`
 
-let session: Promise<ort.InferenceSession> | null = null
+let session: Promise<InferSession> | null = null
+inferClient.onReset(() => {
+  session = null
+})
 
-export function loadDetector(onDownload?: ProgressFn, signal?: AbortSignal): Promise<ort.InferenceSession> {
+export function loadDetector(onDownload?: ProgressFn, signal?: AbortSignal): Promise<InferSession> {
   session ??= (async () => {
     const bytes = await loadModelBytes(detectorUrl, onDownload, signal)
-    return ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' })
+    return inferClient.create(bytes, 120_000, signal)
   })()
   session.catch(() => {
     session = null
@@ -91,8 +93,7 @@ export async function detectWatermarkBoxes(source: ImageData, threshold = 0.25, 
     input[2 * plane + i] = px[i * 4 + 2] / 255
   }
   const name = sess.inputNames[0]
-  const out = await sess.run({ [name]: new ort.Tensor('float32', input, [1, 3, size, size]) })
+  const out = await sess.run({ [name]: { data: input, dims: [1, 3, size, size] } }, 120_000, signal)
   const t = out[sess.outputNames[0]]
-  const n = Number(t.dims[2])
-  return parseDetections((await t.getData()) as Float32Array, n, source.width, source.height, size, threshold)
+  return parseDetections(t.data, Number(t.dims[2]), source.width, source.height, size, threshold)
 }

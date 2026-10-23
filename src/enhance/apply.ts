@@ -1,6 +1,10 @@
 import { enhanceCanvas, type EnhanceOptions } from './enhance'
 import type { WorkerOptions } from './enhance.worker'
 import { useEnhance } from './store'
+import { makeGate } from '../lib/throttle'
+
+/** Per-tile and download progress fires many times a second; intermediate updates are dropped so the UI is not re-rendered for each. */
+const progressGate = makeGate(120)
 
 /** Coarse content statistics from a ~40k-pixel sample: enough to tell a real picture from a blank or collapsed one. */
 export interface CanvasStats {
@@ -77,8 +81,8 @@ function runInWorker(src: OffscreenCanvas, opts: WorkerOptions): Promise<Result>
     }
     worker.onmessage = (ev: MessageEvent) => {
       const m = ev.data
-      if (m.kind === 'progress') useEnhance.getState().set({ progress: { done: m.done, total: m.total, label: m.label } })
-      else if (m.kind === 'download') useEnhance.getState().set({ progress: { done: m.loaded, total: m.total || m.loaded, label: 'Downloading upscaling model' } })
+      if (m.kind === 'progress') progressGate(m.done >= m.total) && useEnhance.getState().set({ progress: { done: m.done, total: m.total, label: m.label } })
+      else if (m.kind === 'download') progressGate(m.loaded >= (m.total || m.loaded)) && useEnhance.getState().set({ progress: { done: m.loaded, total: m.total || m.loaded, label: 'Downloading upscaling model' } })
       else if (m.kind === 'error') {
         finish()
         reject(new Error(m.message))
@@ -117,7 +121,7 @@ export async function applyEnhance(canvas: OffscreenCanvas): Promise<OffscreenCa
     } catch (e) {
       if (e instanceof Error && e.message === 'Cancelled') throw e
       // Worker unavailable or crashed: run on the main thread instead (slower, but it still works).
-      const main: EnhanceOptions = { ...opts, onProgress: (done, total, label) => s.set({ progress: { done, total, label } }) }
+      const main: EnhanceOptions = { ...opts, onProgress: (done, total, label) => progressGate(done >= total) && s.set({ progress: { done, total, label } }) }
       const r = await enhanceCanvas(canvas, main)
       result = { canvas: r.canvas, notes: [...r.notes, 'The background worker was unavailable, so enhancement ran on the main thread.'] }
     }

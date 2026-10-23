@@ -10,6 +10,16 @@ export interface OcrLine {
 
 const BASE = import.meta.env.BASE_URL
 const MAX_OCR_EDGE = 2200
+/** One OCR pass over a 2200 px image takes seconds; past this the worker is considered hung. */
+const OCR_PASS_TIMEOUT_MS = 90_000
+
+function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
 
 let workerPromise: Promise<TessWorker> | null = null
 
@@ -102,7 +112,11 @@ export async function recognizeLines(source: ImageData, opts: OcrOptions): Promi
     if (opts.signal?.aborted) throw new Error('Cancelled')
     const { canvas, w: rw, h: rh } = rotated(base, angle)
     const blob = await canvas.convertToBlob({ type: 'image/png' })
-    const res = await worker.recognize(blob, {}, { blocks: true })
+    const res = await withTimeout(worker.recognize(blob, {}, { blocks: true }), OCR_PASS_TIMEOUT_MS, () => {
+      // A hung OCR worker would block the whole batch: drop it so the next image starts a fresh one.
+      void disposeOcr()
+      return new Error('Text recognition did not finish in time and was stopped.')
+    })
     const rad = (-angle * Math.PI) / 180 // rotate back
     const cos = Math.cos(rad)
     const sin = Math.sin(rad)

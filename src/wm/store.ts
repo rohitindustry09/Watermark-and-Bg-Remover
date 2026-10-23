@@ -2,7 +2,9 @@ import { create } from 'zustand'
 import { decodeFile, makeThumbnail } from '../lib/decode'
 import { emptyHistory, pushOp, redo as redoH, undo as undoH, type Op } from '../lib/ops'
 import { encodeCanvas, exportFilename, downloadBlob, FORMAT_INFO, type ExportFormat } from '../lib/exporter'
-import { buildZip, csvReport, extractImages } from '../lib/zip'
+import { buildZip, csvReport, expandInputs } from '../lib/zip'
+import { dirOf, joinPath } from '../lib/paths'
+import { makeGate } from '../lib/throttle'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type Region, type WmItem, type WmParams, type WmStatus } from './types'
 import { buildMask, regionActive } from './mask'
 import { composeFullResolution, composeResult, restoreImage, type RestoreResult } from './restore'
@@ -97,6 +99,10 @@ interface WmState {
   retry(ids?: string[]): void
 }
 
+/** Progress callbacks can fire hundreds of times a second; every store update re-renders the UI, so intermediate ones are dropped. */
+const dlGate = makeGate(150)
+const progGate = makeGate(100)
+
 export const useWm = create<WmState>((set, get) => {
   const patch = (id: string, p: Partial<WmItem>) => set((s) => ({ items: mapItem(s.items, id, (i) => ({ ...i, ...p })) }))
   const active = () => get().items.find((i) => i.id === get().activeId)
@@ -121,7 +127,7 @@ export const useWm = create<WmState>((set, get) => {
       const thumb = it.thumb ?? (await makeThumbnail(source))
       patch(id, { info: { ...info }, thumb, status: get().autoDetect ? 'detecting' : 'ready' })
       if (get().autoDetect) {
-        const regions = await detectText(source, { rotated: get().rotatedScan, signal, onProgress: (d, t) => set({ progress: { label: `Reading text in ${it.name}`, done: d, total: t } }) })
+        const regions = await detectText(source, { rotated: get().rotatedScan, signal, onProgress: (d, t) => progGate(d >= t) && set({ progress: { label: `Reading text in ${it.name}`, done: d, total: t } }) })
         set({ progress: null })
         const withTint = [...detectTint(source), ...regions]
         patch(id, { regions: withTint, status: 'ready', detectNote: withTint.length ? undefined : 'No readable text found. Use the manual selection tools, or “Find similar” / a reference image for logos.' })
@@ -168,7 +174,7 @@ export const useWm = create<WmState>((set, get) => {
       s.result = await restoreImage(s.source, s.mask, it.params, {
         signal: abort.signal,
         onProgress,
-        onDownload: (loaded, total) => set({ download: { loaded, total } }),
+        onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }),
       })
       set({ download: null })
       s.restored = composeResult(s.source, s.result)
@@ -226,18 +232,8 @@ export const useWm = create<WmState>((set, get) => {
     },
 
     async addFiles(files) {
-      const accepted: File[] = []
-      const problems: string[] = []
-      for (const f of files) {
-        if (/\.zip$/i.test(f.name) || f.type === 'application/zip') {
-          try {
-            accepted.push(...(await extractImages(f)))
-          } catch (e) {
-            problems.push(`${f.name}: ${msg(e)}`)
-          }
-        } else accepted.push(f)
-      }
-      const items: WmItem[] = accepted.map((file) => ({ id: uid(), name: file.name, file, status: 'queued' as WmStatus, regions: [], history: emptyHistory(), params: { ...DEFAULT_WM_PARAMS } }))
+      const { files: accepted, problems } = await expandInputs(files)
+      const items: WmItem[] = accepted.map((file) => ({ id: uid(), name: file.name, dir: dirOf(file), file, status: 'queued' as WmStatus, regions: [], history: emptyHistory(), params: { ...DEFAULT_WM_PARAMS } }))
       set((s) => ({ items: [...s.items, ...items], notice: problems.length ? problems.join('\n') : s.notice }))
       void pump()
     },
@@ -276,7 +272,7 @@ export const useWm = create<WmState>((set, get) => {
       if (!it || !session) return
       try {
         patch(it.id, { status: 'detecting' })
-        const regions = await detectText(session.source, { rotated: get().rotatedScan, signal: abort.signal, onProgress: (d, t) => set({ progress: { label: 'Reading text', done: d, total: t } }) })
+        const regions = await detectText(session.source, { rotated: get().rotatedScan, signal: abort.signal, onProgress: (d, t) => progGate(d >= t) && set({ progress: { label: 'Reading text', done: d, total: t } }) })
         set({ progress: null })
         patch(it.id, { regions: [...detectTint(session.source), ...regions], status: 'ready', detectNote: regions.length ? undefined : 'No readable text found.' })
         refreshMask()
@@ -291,7 +287,7 @@ export const useWm = create<WmState>((set, get) => {
       if (!it || !session) return
       try {
         set({ progress: { label: 'AI watermark detector', done: 0, total: 1 } })
-        const found = await detectWithModel(session.source, { signal: abort.signal, onDownload: (loaded, total) => set({ download: { loaded, total } }) })
+        const found = await detectWithModel(session.source, { signal: abort.signal, onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }) })
         set({ progress: null, download: null })
         const fresh = found.filter((r) => !it.regions.some((x) => Math.abs(x.box[0] - r.box[0]) < 12 && Math.abs(x.box[1] - r.box[1]) < 12))
         patch(it.id, { regions: [...fresh, ...it.regions] })
@@ -433,8 +429,8 @@ export const useWm = create<WmState>((set, get) => {
         const s = session
         const result = await restoreImage(s.source, s.mask, it.params, {
           signal: abort.signal,
-          onProgress: (d, t, l) => set({ progress: { label: l, done: d, total: t } }),
-          onDownload: (loaded, total) => set({ download: { loaded, total } }),
+          onProgress: (d, t, l) => progGate(d >= t) && set({ progress: { label: l, done: d, total: t } }),
+          onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }),
         })
         s.result = result
         s.restored = composeResult(s.source, result)
@@ -458,7 +454,7 @@ export const useWm = create<WmState>((set, get) => {
         if (abort.signal.aborted) break
         try {
           set({ progress: { label: `Restoring ${it.name}`, done: n, total: targets.length } })
-          const r = await produce(it.id, (d, t, l) => set({ progress: { label: `${it.name}: ${l}`, done: n + d / Math.max(1, t), total: targets.length } }))
+          const r = await produce(it.id, (d, t, l) => progGate(d >= t) && set({ progress: { label: `${it.name}: ${l}`, done: n + d / Math.max(1, t), total: targets.length } }))
           patch(it.id, { status: 'done', outBlob: r.blob, outName: r.name, result: r.result, error: undefined })
           ok++
         } catch (e) {
@@ -495,14 +491,14 @@ export const useWm = create<WmState>((set, get) => {
       }
       try {
         const rows = get().items.map((i) => ({
-          source: i.name,
-          output: i.outName ?? '',
+          source: joinPath(i.dir, i.name),
+          output: i.outName ? joinPath(i.dir, i.outName) : '',
           status: i.outBlob ? 'restored' : i.error ? 'skipped/failed' : i.status,
           method: i.result?.method ?? '',
           mask_percent: i.result ? i.result.maskPercent.toFixed(2) : '',
           note: i.error ?? i.result?.warnings.join(' | ') ?? '',
         }))
-        const zip = await buildZip(done.map((i) => ({ name: i.outName!, blob: i.outBlob! })), [{ name: 'restoration-report.csv', text: csvReport(rows) }])
+        const zip = await buildZip(done.map((i) => ({ name: joinPath(i.dir, i.outName!), blob: i.outBlob! })), [{ name: 'restoration-report.csv', text: csvReport(rows) }])
         downloadBlob(zip, 'restored.zip')
       } catch (e) {
         set({ notice: `ZIP export failed: ${msg(e)}` })

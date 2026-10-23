@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useStudio, type Status } from '../state/studio'
+import { memo, useEffect, useState } from 'react'
+import { useStudio, type Item, type Status } from '../state/studio'
 import { estimateEta, formatClock, formatDuration } from '../lib/eta'
 
 const LABEL: Record<Status, string> = {
@@ -17,7 +17,10 @@ const WORKING: Status[] = ['queued', 'decoding', 'cleaning', 'loading-model', 'r
 
 /** Time left and the clock time the batch should finish, from how long the finished images took (or the export so far). */
 function TimeLeft() {
-  const { items, procMs, paused, exportProgress } = useStudio()
+  const items = useStudio((s) => s.items)
+  const procMs = useStudio((s) => s.procMs)
+  const paused = useStudio((s) => s.paused)
+  const exportProgress = useStudio((s) => s.exportProgress)
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 15000)
@@ -44,9 +47,60 @@ function TimeLeft() {
   )
 }
 
+interface ThumbProps {
+  it: Item
+  active: boolean
+  open: (id: string) => Promise<void>
+  remove: (id: string) => void
+  retry: (ids?: string[]) => void
+}
+
+/** One library tile. Memoised so a status change on one image re-renders that tile, not the whole strip (hundreds of tiles in a big batch). */
+const Thumb = memo(function Thumb({ it, active, open, remove, retry }: ThumbProps) {
+  return (
+    <li className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => void open(it.id)}
+        aria-label={`${it.name}: ${LABEL[it.status]}`}
+        aria-current={active}
+        className={`group relative block h-[52px] w-[68px] overflow-hidden rounded border ${active ? 'border-accent' : 'border-line'} bg-raised`}
+      >
+        {it.thumb ? <img src={it.thumb} alt="" className="h-full w-full object-cover" /> : <span className="grid h-full place-items-center text-muted">…</span>}
+        <span
+          className={`absolute inset-x-0 bottom-0 truncate px-1 text-[10px] ${it.status === 'error' ? 'bg-danger text-black' : it.status === 'done' ? 'bg-black/60 text-fg' : 'bg-black/70 text-accent'}`}
+          title={it.error}
+        >
+          {LABEL[it.status]}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={() => remove(it.id)}
+        aria-label={`Remove ${it.name}`}
+        className="absolute -right-1 -top-1 hidden h-4 w-4 rounded-full bg-black/80 text-[10px] leading-4 text-fg group-hover:block focus:block [li:hover_&]:block"
+      >
+        ×
+      </button>
+      {(it.status === 'error' || it.status === 'cancelled') && (
+        <button type="button" onClick={() => retry([it.id])} className="absolute left-0 top-0 rounded-br bg-black/80 px-1 text-[10px] text-accent" aria-label={`Retry ${it.name}`}>
+          ↻
+        </button>
+      )}
+    </li>
+  )
+})
+
 export function BottomBar() {
-  const { items, activeId, openItem, removeItem, retry, device } = useStudio()
+  // Individual selectors: this bar must not re-render for unrelated store changes (sliders, progress, brush strokes).
+  const items = useStudio((s) => s.items)
+  const activeId = useStudio((s) => s.activeId)
+  const openItem = useStudio((s) => s.openItem)
+  const removeItem = useStudio((s) => s.removeItem)
+  const retry = useStudio((s) => s.retry)
+  const note = useStudio((s) => s.device?.note)
   const finished = items.filter((i) => i.status === 'done' || i.status === 'error' || i.status === 'cancelled').length
+  const failed = items.filter((i) => i.status === 'error').length
   const pct = items.length ? Math.round((finished / items.length) * 100) : 0
   return (
     <footer className="flex h-[92px] shrink-0 flex-col border-t border-line bg-panel">
@@ -54,9 +108,9 @@ export function BottomBar() {
         <span>
           {items.length ? `${finished}/${items.length} processed` : 'No images'}
           <TimeLeft />
-          {items.some((i) => i.status === 'error') && <span className="ml-2 text-danger">{items.filter((i) => i.status === 'error').length} failed</span>}
+          {failed > 0 && <span className="ml-2 text-danger">{failed} failed</span>}
         </span>
-        <span className="font-mono">{device?.note}</span>
+        <span className="font-mono">{note}</span>
       </div>
       {items.length > 1 && (
         <div className="mx-3 mt-1 h-0.5 overflow-hidden rounded bg-raised" aria-hidden>
@@ -65,36 +119,7 @@ export function BottomBar() {
       )}
       <ul className="flex flex-1 items-center gap-2 overflow-x-auto px-3 scroll-thin" aria-label="Image library">
         {items.map((it) => (
-          <li key={it.id} className="relative shrink-0">
-            <button
-              type="button"
-              onClick={() => void openItem(it.id)}
-              aria-label={`${it.name}: ${LABEL[it.status]}`}
-              aria-current={it.id === activeId}
-              className={`group relative block h-[52px] w-[68px] overflow-hidden rounded border ${it.id === activeId ? 'border-accent' : 'border-line'} bg-raised`}
-            >
-              {it.thumb ? <img src={it.thumb} alt="" className="h-full w-full object-cover" /> : <span className="grid h-full place-items-center text-muted">…</span>}
-              <span
-                className={`absolute inset-x-0 bottom-0 truncate px-1 text-[10px] ${it.status === 'error' ? 'bg-danger text-black' : it.status === 'done' ? 'bg-black/60 text-fg' : 'bg-black/70 text-accent'}`}
-                title={it.error}
-              >
-                {LABEL[it.status]}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => removeItem(it.id)}
-              aria-label={`Remove ${it.name}`}
-              className="absolute -right-1 -top-1 hidden h-4 w-4 rounded-full bg-black/80 text-[10px] leading-4 text-fg group-hover:block focus:block [li:hover_&]:block"
-            >
-              ×
-            </button>
-            {(it.status === 'error' || it.status === 'cancelled') && (
-              <button type="button" onClick={() => retry([it.id])} className="absolute left-0 top-0 rounded-br bg-black/80 px-1 text-[10px] text-accent" aria-label={`Retry ${it.name}`}>
-                ↻
-              </button>
-            )}
-          </li>
+          <Thumb key={it.id} it={it} active={it.id === activeId} open={openItem} remove={removeItem} retry={retry} />
         ))}
       </ul>
     </footer>

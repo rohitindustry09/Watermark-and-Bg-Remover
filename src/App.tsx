@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStudio } from './state/studio'
+import { collectDropped } from './lib/paths'
 import { Toolbar } from './components/Toolbar'
 import { LeftPanel } from './components/LeftPanel'
 import { RightPanel } from './components/RightPanel'
@@ -82,8 +83,10 @@ function BgApp({ mode, onMode }: { mode: Mode; onMode: (m: Mode) => void }) {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setDragging(false)
-    const files = [...e.dataTransfer.files]
-    if (files.length) void s.addFiles(files)
+    // Folders dropped from the file manager are walked recursively so their subfolders are read too.
+    void collectDropped(e.dataTransfer).then((files) => {
+      if (files.length) void s.addFiles(files)
+    })
   }
 
   return (

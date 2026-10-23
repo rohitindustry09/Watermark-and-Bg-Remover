@@ -1,15 +1,9 @@
 import * as ort from 'onnxruntime-web'
-import jsepWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url'
-import jsepMjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url'
+import { wasmThreads } from './ortEnv'
+import { InferError, inferClient, type InferSession } from './inferClient'
 import { MODELS, modelUrl, type ModelId, type ModelSpec, type Precision } from './models'
 import { loadModelBytes, type ProgressFn } from './modelStore'
 import { modelInputSize, toTensorData } from './preprocess'
-
-// The JSEP build serves both WebGPU and CPU execution providers; Vite fingerprints and serves the file.
-// An explicit loader URL is required: otherwise multi-threaded builds spawn their thread workers from the app bundle itself.
-ort.env.wasm.wasmPaths = { mjs: jsepMjsUrl, wasm: jsepWasmUrl }
-ort.env.wasm.numThreads =
-  typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1
 
 export type Device = 'webgpu' | 'wasm'
 
@@ -24,7 +18,7 @@ let deviceInfo: Promise<DeviceInfo> | null = null
 
 export function detectDevice(): Promise<DeviceInfo> {
   deviceInfo ??= (async (): Promise<DeviceInfo> => {
-    const threads = ort.env.wasm.numThreads ?? 1
+    const threads = wasmThreads()
     const params = new URLSearchParams(globalThis.location?.search ?? '')
     const forced = params.get('device') // ?device=cpu forces the CPU backend; ?fp16=0 forces fp32 weights on the GPU
     try {
@@ -43,7 +37,7 @@ export function detectDevice(): Promise<DeviceInfo> {
 
 /** Called when the GPU path fails at run time: all later work (including a retry) uses the CPU backend. */
 export function disableGpu(reason: string): void {
-  const threads = ort.env.wasm.numThreads ?? 1
+  const threads = wasmThreads()
   deviceInfo = Promise.resolve({ device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU unavailable: ${reason.slice(0, 60)}` })
   for (const p of sessions.values()) void p.then((m) => m.session.release()).catch(() => undefined)
   sessions.clear()
@@ -51,7 +45,8 @@ export function disableGpu(reason: string): void {
 
 export interface LoadedModel {
   spec: ModelSpec
-  session: ort.InferenceSession
+  /** WebGPU sessions live on this page (GPU work is asynchronous); CPU sessions live in the inference worker so the page never blocks. */
+  session: ort.InferenceSession | InferSession
   device: Device
   precision: Precision
   inputName: string
@@ -59,11 +54,15 @@ export interface LoadedModel {
 }
 
 const sessions = new Map<string, Promise<LoadedModel>>()
+// A terminated inference worker takes its sessions with it: forget them so the next use reloads the model.
+inferClient.onReset(() => {
+  for (const k of [...sessions.keys()]) if (k.includes(':wasm:')) sessions.delete(k)
+})
 
 export type EngineErrorCode = 'model-unavailable' | 'gpu-init' | 'out-of-memory' | 'inference' | 'timeout' | 'cancelled'
 
 /** Hard limits so a hung GPU driver or runaway CPU run cannot freeze a batch forever. */
-export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 60_000, wasm: 600_000 }
+export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 60_000, wasm: 300_000 }
 
 export class EngineError extends Error {
   constructor(
@@ -75,11 +74,24 @@ export class EngineError extends Error {
   }
 }
 
+/** GPU session creation compiles shaders on this page; a wedged driver would otherwise hang here forever (the run itself already has a timeout). */
+async function createGpuSession(bytes: Uint8Array, device: Device): Promise<ort.InferenceSession> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new EngineError('The GPU did not finish preparing the model in time.', 'timeout')), 120_000)
+  })
+  try {
+    return await Promise.race([ort.InferenceSession.create(bytes, { executionProviders: [device], graphOptimizationLevel: 'all' }), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 function looksLikeOom(e: unknown): boolean {
   return /out of memory|allocation|memory access|RangeError/i.test(String((e as Error)?.message ?? e))
 }
 
-function build(spec: ModelSpec, session: ort.InferenceSession, device: Device, precision: Precision): LoadedModel {
+function build(spec: ModelSpec, session: ort.InferenceSession | InferSession, device: Device, precision: Precision): LoadedModel {
   return { spec, session, device, precision, inputName: session.inputNames[0], outputName: session.outputNames[session.outputNames.length - 1] }
 }
 
@@ -104,7 +116,7 @@ export async function loadModel(id: ModelId, onDownload?: ProgressFn, signal?: A
           const wasmFromGpu = device === 'wasm' && dev.device === 'webgpu'
           const usedPrecision = wasmFromGpu ? cpuPrecision : precision
           const useBytes = wasmFromGpu ? await loadModelBytes(modelUrl(spec, usedPrecision), onDownload, signal) : bytes
-          const session = await ort.InferenceSession.create(useBytes, { executionProviders: [device], graphOptimizationLevel: 'all' })
+          const session = device === 'wasm' ? await inferClient.create(useBytes, 180_000, signal) : await createGpuSession(useBytes, device)
           return build(spec, session, device, usedPrecision)
         } catch (e) {
           lastErr = e
@@ -156,29 +168,40 @@ export async function segment(model: LoadedModel, image: ImageData, signal?: Abo
   const small = resizeImageData(image, size.w, size.h)
   const data = toTensorData(small.data, size.w, size.h, spec.mean, spec.std)
   if (signal?.aborted) throw new EngineError('Cancelled', 'cancelled')
-  const input = new ort.Tensor('float32', data, [1, 3, size.h, size.w])
-  let out: ort.Tensor
+  let raw: Float32Array
+  let dims: readonly number[]
   try {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new EngineError(`Processing timed out after ${INFERENCE_TIMEOUT_MS[model.device] / 1000}s on ${model.device === 'webgpu' ? 'the GPU' : 'the CPU'}.`, 'timeout')), INFERENCE_TIMEOUT_MS[model.device])
-    })
-    try {
-      const res = await Promise.race([model.session.run({ [model.inputName]: input }), timeout])
-      out = res[model.outputName]
-    } finally {
-      clearTimeout(timer)
+    if (model.device === 'wasm') {
+      const out = (await (model.session as InferSession).run({ [model.inputName]: { data, dims: [1, 3, size.h, size.w] } }, INFERENCE_TIMEOUT_MS.wasm, signal))[model.outputName]
+      raw = out.data
+      dims = out.dims
+    } else {
+      const session = model.session as ort.InferenceSession
+      const input = new ort.Tensor('float32', data, [1, 3, size.h, size.w])
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new EngineError(`Processing timed out after ${INFERENCE_TIMEOUT_MS.webgpu / 1000}s on the GPU.`, 'timeout')), INFERENCE_TIMEOUT_MS.webgpu)
+      })
+      try {
+        const out = (await Promise.race([session.run({ [model.inputName]: input }), timeout]))[model.outputName]
+        raw = (await out.getData()) as Float32Array
+        dims = out.dims
+      } finally {
+        clearTimeout(timer)
+      }
     }
   } catch (e) {
     if (e instanceof EngineError) throw e
+    if (e instanceof InferError) {
+      if (e.code === 'timeout') throw new EngineError(`Processing timed out after ${INFERENCE_TIMEOUT_MS.wasm / 1000}s on the CPU, so it was stopped.`, 'timeout')
+      if (signal?.aborted) throw new EngineError('Cancelled', 'cancelled')
+    }
     if (looksLikeOom(e)) {
       throw new EngineError('Ran out of memory while processing this image. Try the Speed profile or a smaller image.', 'out-of-memory')
     }
     throw new EngineError(`AI inference failed: ${(e as Error)?.message ?? e}`, 'inference')
   }
   if (signal?.aborted) throw new EngineError('Cancelled', 'cancelled')
-  const raw = (await out.getData()) as Float32Array
-  const dims = out.dims
   const outH = Number(dims[dims.length - 2])
   const outW = Number(dims[dims.length - 1])
   const matte = new Float32Array(outW * outH)

@@ -157,7 +157,32 @@ On the statue's base the result keeps the rope detail and the rim line instead o
 look of the fill varies with the surrounding texture. The full Thorough run on the statue took 78–81 s on the CPU with the guided fill (59 s with the unguided version; 65–86 s before this change
 when it repainted 5–19 regions; single runs each, not averaged).
 
-### Bulk batches: shared marks, fast fill, resume
+### Responsiveness and hangs
+
+Measured on a 990×990 photo with watermark removal on (single runs on this CPU, so treat the ratios as indicative):
+
+- **Page freezes.** CPU AI models (LaMa, the watermark detector, the CPU segmentation models) used to run on the page's main thread, which blocks it for the whole run: one LaMa fill froze the
+  page for 23 s, and 44 s of a 65 s batch run was spent frozen. They now run in a dedicated inference worker (`src/lib/infer.worker.ts`), and the mask morphology that remained on
+  the main thread was made O(pixels) instead of O(pixels × radius) with identical output (`src/lib/morphology.ts`, checked against the old code on random masks). The longest freeze fell
+  from 23 s to under 1 s and the frozen share of a run from about two thirds to about 5%.
+- **Faster as a side effect.** `clusterMask` 2294 → 79 ms, `ringDetail` 451 → 38 ms, `buildMask` 466 → 89 ms, `detectTint` 839 → 318 ms, `segmentVeil` 1568 → 414 ms. One LaMa fill took about 16 s
+  in the worker against about 25 s on the main thread. The thorough run on the statue went from 29–37 s to 23–27 s warm. These costs scale with image area, so larger images gain more.
+- **No more silent hangs.** A run that overruns is stopped for real: the inference worker is terminated (impossible on the main thread, where a timer cannot even fire while it is blocked) and the
+  next image starts a fresh one (LaMa 240 s, CPU segmentation 300 s, detector 120 s). A model download with no data for 45 s, or no response in 60 s, fails with a clear message; an OCR pass
+  over 90 s restarts the OCR worker; GPU model preparation over 120 s is abandoned; and the whole watermark stage of one image is capped at 8 minutes, after which that image continues without
+  watermark removal and the batch moves on.
+- **Fewer UI re-renders.** Download, tile and OCR progress updates are rate-limited at the source (a store update re-renders the UI), and the image strip no longer re-renders every tile on each change.
+
+Not covered: the WebGPU path (BiRefNet) was not exercised here, so its behaviour on your GPU is unchanged apart from the new timeout on preparing the model; the stall and hang safety nets are
+unit-tested with fake timers and workers, not triggered by a real network failure; the Overlays tool shares these modules but was not run live in this pass.
+
+### Bulk batches: folders, shared marks, fast fill, resume
+
+- **Folder structure in, same structure out.** A ZIP can contain folders nested to any depth: every image is found, and the export ZIP recreates the same folders
+  (`shoot/day1/deep/hat.png` → `shoot/day1/deep/hat_cutout.png`), so same-named files in different folders stay separate. This also works for the **Folder** button
+  (the picked folder's subfolders) and for folders dragged from your file manager. Hidden and system entries (`.git`, `.DS_Store`, `__MACOSX`), absolute or `..` paths and
+  non-image files are skipped (non-images are counted in a note). The CSV report lists the full paths. A ZIP may hold up to 2000 images and 500 MB once unpacked; a ZIP inside a ZIP is not opened.
+  Checked end to end in the app on a 5-image ZIP nested six folders deep; folder drag-and-drop is covered by code, not by a test I could run here.
 
 For a ZIP or a multi-file drop with **Remove watermarks first** on (`src/wm/batch.ts`, `src/lib/resume.ts`):
 
