@@ -15,6 +15,7 @@ export const PATCH_MAX_AREA = 40_000
  * surroundings get Telea for small marks and LaMa for large ones. `detail`/`area` are optional so callers without them keep the size rule.
  */
 export function pickMethod(method: RestoreMethod, box: Box, detail?: number, area = 0): 'telea' | 'lama' | 'patch' {
+  if (method === 'iopaint') return 'lama' // only reached when the server is unavailable; the closest built-in is LaMa
   if (method !== 'auto') return method
   if (detail === undefined) return Math.max(box[2] - box[0], box[3] - box[1]) <= SMALL_REGION_PX ? 'telea' : 'lama'
   if (detail >= PATCH_DETAIL && area > 0 && area <= PATCH_MAX_AREA) return 'patch'

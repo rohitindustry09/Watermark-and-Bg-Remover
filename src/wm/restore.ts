@@ -5,6 +5,7 @@ import { LAMA, LamaError, lamaAllowedByDefault, loadLama, runLama } from './lama
 import { erodeBinary } from '../lib/morphology'
 import { WM_PROFILES, type WmParams } from './types'
 import { wmClient } from './wmClient'
+import { IopaintError, inpaintWithIopaint } from './iopaint'
 
 export { blendAlpha, composeResult, pickMethod, SMALL_REGION_PX }
 
@@ -24,6 +25,8 @@ export interface RestoreHooks {
   unknown?: Uint8Array
   /** Allow LaMa in automatic mode. Defaults to a memory-based policy (see `lamaAllowedByDefault`); an explicitly chosen LaMa always runs. */
   lama?: boolean
+  /** Address of a local IOPaint server, used when the method is 'iopaint'. */
+  iopaintUrl?: string
   onProgress?: (done: number, total: number, label: string) => void
   onDownload?: (loaded: number, total: number) => void
   signal?: AbortSignal
@@ -40,8 +43,9 @@ function canvasOf(img: ImageData): OffscreenCanvas {
   return c
 }
 
-export async function restoreImage(source: ImageData, mask: Uint8Array, params: WmParams, hooks: RestoreHooks = {}): Promise<RestoreResult> {
+export async function restoreImage(source: ImageData, mask: Uint8Array, requested: WmParams, hooks: RestoreHooks = {}): Promise<RestoreResult> {
   const t0 = performance.now()
+  let params = requested
   const { width: w, height: h } = source
   const warnings: string[] = []
   const area = maskArea(mask)
@@ -56,6 +60,19 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, params: 
   const gray = toGray(source.data, w, h)
 
   const maskPercent = (area / (w * h)) * 100
+  if (params.method === 'iopaint') {
+    hooks.onProgress?.(0, 1, 'Reconstructing with IOPaint')
+    try {
+      const out = await inpaintWithIopaint(source, mask, hooks.iopaintUrl ?? '', { signal: hooks.signal })
+      for (let i = 0; i < w * h; i++) if (mask[i]) filled.set(out.subarray(i * 4, i * 4 + 3), i * 4)
+      return { filled, alpha: blendAlpha(mask, w, h, params.feather), methods: ['IOPaint LaMa'], warnings, ms: performance.now() - t0, maskPercent }
+    } catch (e) {
+      if (hooks.signal?.aborted || !(e instanceof IopaintError)) throw e
+      // Not silent: the result says the chosen backend was not used.
+      warnings.push(`${e.message} The built-in fill was used instead.`)
+      params = { ...params, method: 'auto' }
+    }
+  }
   if (maskPercent > 12) warnings.push(`The mask covers ${maskPercent.toFixed(0)}% of the image. A large reconstruction is a guess, not recovery.`)
   const detail = ringDetail(gray, mask, w, h)
   if (detail > 22) warnings.push('The area around the mask has strong edges or fine detail. Inspect the result closely: lines and textures may be invented or misaligned.')

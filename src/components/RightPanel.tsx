@@ -1,5 +1,7 @@
-import { useRef } from 'react'
-import { useStudio } from '../state/studio'
+import { useRef, useState } from 'react'
+import { getSession, useStudio } from '../state/studio'
+import { checkSessionQuality } from '../state/session'
+import type { CutoutQuality } from '../lib/qa'
 import { CANVAS_PRESETS, type BgKind, type FitMode } from '../lib/composite'
 import { DEFAULT_PARAMS, type RefineParams } from '../lib/matte'
 import { FORMAT_INFO, type ExportFormat } from '../lib/exporter'
@@ -7,6 +9,36 @@ import { Btn, ColorField, Section, Segmented, Select, Slider, Toggle } from './u
 import { EnhancePanel } from './EnhancePanel'
 
 const SWATCHES = ['#ffffff', '#000000', '#f3f4f6', '#e8dcc8', '#dbeafe', '#fde68a']
+
+/** On-demand check of the current cutout for holes, a kept backdrop rim and stray specks. Heuristic, so it says "possible". */
+function QualityCheck() {
+  const activeId = useStudio((st) => st.activeId)
+  const tick = useStudio((st) => st.tick)
+  const [result, setResult] = useState<{ key: string; q: CutoutQuality } | null>(null)
+  const key = `${activeId}:${tick}`
+  const run = () => {
+    const sess = getSession()
+    if (sess) setResult({ key, q: checkSessionQuality(sess) })
+  }
+  const q = result && result.key === key ? result.q : null
+  return (
+    <div className="space-y-1">
+      <Btn onClick={run}>Check cutout quality</Btn>
+      {q &&
+        (q.warnings.length === 0 ? (
+          <p className="rounded border border-line px-2 py-1 text-[12px] text-muted">
+            No holes, halo or specks found (hole {q.suspectHolePercent.toFixed(1)}%, rim {q.fringePercent.toFixed(0)}%, specks {q.specks}). This is a heuristic, so still look at the edges.
+          </p>
+        ) : (
+          q.warnings.map((w) => (
+            <p key={w} className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[12px] text-warn">
+              {w}
+            </p>
+          ))
+        ))}
+    </div>
+  )
+}
 
 export function RightPanel() {
   const s = useStudio()
@@ -98,6 +130,8 @@ export function RightPanel() {
               </p>
             ))}
             {s.coverage < 0.5 && s.activeId && <p className="rounded border border-danger/50 bg-danger/10 px-2 py-1 text-danger">The current mask is nearly empty — export is blocked until something is kept.</p>}
+            <QualityCheck />
+
           </>
         )}
       </Section>

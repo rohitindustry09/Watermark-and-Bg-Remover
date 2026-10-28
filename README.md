@@ -320,6 +320,37 @@ Before an enhanced image replaces the export it is compared with the input (alph
 the unenhanced image is exported instead, and the panel says why. The background tool also refuses to save a composite that is fully transparent while a subject was detected.
 If the worker cannot start, enhancement falls back to the main thread (slower, still correct).
 
+### Cutout quality check
+
+The right panel has **Check cutout quality**. It measures the current matte against the photo (on a 1024px reduction) and reports: transparent holes
+whose pixels do not look like backdrop (subject content the matte lost), a rim of backdrop-coloured pixels kept at the edge (halo), and stray specks.
+It is a heuristic that says "possible"; it cannot prove a cutout is correct. Unit-tested in `tests/qa.test.ts` on synthetic scenes only; it has not been
+benchmarked on a labelled photo set.
+
+### Spec coverage gaps (not built, and why)
+
+Promptable segmentation (SAM 2), text-prompt selection, diffusion/reference-conditioned reconstruction, MAT, a server-side GPU job queue with VRAM
+management, TIFF export and colour-profile handling are not implemented. The app is client-side (browser, onnxruntime-web); the dev machine has 5.5 GB RAM
+and no NVIDIA GPU, so none of those could be run or verified here. Upscaling is Real-ESRGAN-style enhancement, not recovery of lost detail.
+
+### Optional IOPaint backend (watermark tool)
+
+Pick **Method → IOPaint server** and run a local server: `iopaint start --model lama --device cpu --port 8080` (IOPaint 1.6.0, Apache-2.0, archived upstream; its old
+dependency pins need Python 3.11, not 3.14). The photo and mask are sent to `/api/v1/inpaint` on that address; only localhost addresses are accepted. Only the masked
+pixels are taken from the result. If the server is down the built-in fill runs and the result lists that as a warning. Checked live in the browser on a 640px corner-stamp
+case: 25.6 dB inside the mask against the clean photo (10.8 dB unrepaired), 0 pixels changed outside the mask, about 10 s on CPU. Not tested: batch mode, large images, other IOPaint models.
+
+### Synthetic watermark benchmark
+
+`scripts/bench/make_watermark_set.py <photos> <out> [count] [edge]` composites tiled, corner and centred watermarks onto clean photos (the clean photo is the
+ground truth); `BENCH_DIR=<out> npx vitest run --config vitest.bench.config.ts` scores the Telea and patch fills inside the mask (PSNR against the truth).
+First run (12 product photos at 640px, exact masks, 4 per kind): Telea r5 reached 23.8 dB on the opaque corner stamp (no removal: 17.5 dB), but only 18.1 dB on the
+tiled translucent mark (18.0 dB without removal) and 15.1 dB on the centred translucent mark (14.6 dB). The patch fill was worse than Telea on two of three kinds.
+IOPaint 1.6.0 LaMa (CPU, about 6 s per 640px image, run with `iopaint run --model lama` in a Python 3.11 venv; IOPaint pins old dependencies with no Python 3.14 wheels)
+scored higher on every kind: 26.3 dB corner, 19.7 dB tiled, 15.8 dB centred. It is the best fill measured, but the gain on translucent marks is small, so the loss there is mostly
+that an exact mask discards the information under a translucent mark. The `ms` column for that row is file-read time, not inference.
+This scores the plain fills only, not the full pipeline (OCR, stroke and tint recovery, LaMa), which needs a browser. Masks here are exact, so detection is not scored.
+
 ### Limits you should know about
 
 - **OCR is weak on faint overlays.** On the 42–55% opacity test it misread "SAMPLE" and found nothing usable; it reads clean, high-contrast text well

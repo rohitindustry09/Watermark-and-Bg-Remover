@@ -5,6 +5,7 @@ import { decodeFile } from '../lib/decode'
 import { alphaBounds, type Bounds } from '../lib/composite'
 import type { Analysis, RefineParams } from '../lib/matte'
 import type { Op } from '../lib/ops'
+import { qualityCheck, type CutoutQuality } from '../lib/qa'
 
 export interface RawAsset {
   /** Model matte quantised to 8 bits (1 byte/pixel) so large batches stay within memory. */
@@ -82,6 +83,24 @@ export async function computeSession(s: Session, params: RefineParams, ops: Op[]
   let sum = 0
   for (let i = 0; i < r.alpha.length; i += 5) sum += r.alpha[i] > 0.5 ? 1 : 0
   s.coverage = (sum / Math.ceil(r.alpha.length / 5)) * 100
+}
+
+const QA_MAX_EDGE = 1024
+
+/** Runs the cutout quality check on a nearest-neighbour reduction (at most 1024px), so it stays quick on large photos. */
+export function checkSessionQuality(s: Session): CutoutQuality {
+  const k = Math.min(1, QA_MAX_EDGE / Math.max(s.w, s.h))
+  const w = Math.max(1, Math.round(s.w * k))
+  const h = Math.max(1, Math.round(s.h * k))
+  const alpha = new Float32Array(w * h)
+  const rgba = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const src = Math.min(s.h - 1, Math.floor(y / k)) * s.w + Math.min(s.w - 1, Math.floor(x / k))
+      alpha[y * w + x] = s.alpha[src]
+      rgba.set(s.source.data.subarray(src * 4, src * 4 + 4), (y * w + x) * 4)
+    }
+  return qualityCheck(alpha, rgba, w, h)
 }
 
 export function disposeSession(s: Session | null): void {

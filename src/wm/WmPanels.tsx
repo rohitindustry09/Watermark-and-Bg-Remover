@@ -5,6 +5,7 @@ import { EnhancePanel } from '../components/EnhancePanel'
 import { CATEGORY_LABEL, type Category } from './overlay'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type RestoreMethod, type RestoreProfile } from './types'
 import { LAMA } from './lama'
+import { getIopaintUrl, normalizeServerUrl, setIopaintUrl } from './iopaint'
 import type { ExportFormat } from '../lib/exporter'
 
 const TOOLS: { id: WmTool; label: string; key: string; hint: string }[] = [
@@ -148,6 +149,31 @@ export function WmLeft() {
   )
 }
 
+/** Address of a local IOPaint server. Remote hosts are refused so photos never leave this computer. */
+function IopaintAddress() {
+  const [text, setText] = useState(getIopaintUrl)
+  const valid = normalizeServerUrl(text) !== null
+  return (
+    <div className="space-y-1">
+      <label className="block text-[12px] text-muted" htmlFor="iopaint-url">IOPaint address</label>
+      <input
+        id="iopaint-url"
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value)
+          const ok = normalizeServerUrl(e.target.value)
+          if (ok) setIopaintUrl(ok)
+        }}
+        className="w-full rounded border border-line bg-transparent px-2 py-1 font-mono text-[12px]"
+        spellCheck={false}
+      />
+      <p className={`text-[11px] ${valid ? 'text-muted' : 'text-warn'}`}>
+        {valid ? 'Start it with: iopaint start --model lama --device cpu --port 8080. The photo and mask are sent only to this computer; if the server is not reachable the built-in fill is used and the result says so.' : 'Use an address on this computer, such as http://127.0.0.1:8080.'}
+      </p>
+    </div>
+  )
+}
+
 export function WmRight() {
   const s = useWm()
   const item = s.items.find((i) => i.id === s.activeId)
@@ -231,8 +257,10 @@ export function WmRight() {
             { value: 'patch', label: 'Patch (copies real texture, keeps detail sharp)' },
             { value: 'telea', label: 'Telea (fast, small marks)' },
             { value: 'lama', label: `LaMa (contextual, ${LAMA.sizeMB} MB download)` },
+            { value: 'iopaint', label: 'IOPaint server (LaMa on this computer, optional)' },
           ]}
         />
+        {p.method === 'iopaint' && <IopaintAddress />}
         <Slider label="Telea radius" value={p.teleaRadius} min={2} max={12} unit=" px" onChange={(teleaRadius) => set({ teleaRadius })} hint="Telea only: neighbourhood used to estimate each pixel" />
         {teleaOff && <p className="text-[11px] text-muted">Telea radius is only used by Telea (and by Automatic for small marks).</p>}
         <Slider label="Edge feather" value={p.feather} min={0} max={12} unit=" px" onChange={(feather) => set({ feather })} hint="Blends the reconstruction into the photo over this distance, inside the mask only" />

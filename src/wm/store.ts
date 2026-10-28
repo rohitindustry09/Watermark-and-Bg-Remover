@@ -7,6 +7,7 @@ import { dirOf, joinPath } from '../lib/paths'
 import { makeGate } from '../lib/throttle'
 import { DEFAULT_WM_PARAMS, WM_PROFILES, type Region, type WmItem, type WmParams, type WmStatus } from './types'
 import { buildMask, regionActive } from './mask'
+import { getIopaintUrl } from './iopaint'
 import { composeFullResolution, composeResult, restoreImage, type RestoreResult } from './restore'
 import { detectText, detectTint, detectWithModel, findByReference, findSimilar, detectTextOverlays } from './detect'
 import { wmClient } from './wmClient'
@@ -180,6 +181,7 @@ export const useWm = create<WmState>((set, get) => {
     if (!s.result) {
       s.result = await restoreImage(s.source, s.mask, it.params, {
         signal: abort.signal,
+        iopaintUrl: getIopaintUrl(),
         onProgress,
         onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }),
       })
@@ -436,6 +438,7 @@ export const useWm = create<WmState>((set, get) => {
         const s = session
         const result = await restoreImage(s.source, s.mask, it.params, {
           signal: abort.signal,
+          iopaintUrl: getIopaintUrl(),
           onProgress: (d, t, l) => progGate(d >= t) && set({ progress: { label: l, done: d, total: t } }),
           onDownload: (loaded, total) => dlGate(loaded >= total) && set({ download: { loaded, total } }),
         })
