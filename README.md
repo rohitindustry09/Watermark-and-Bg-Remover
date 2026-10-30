@@ -8,6 +8,25 @@ There is no backend and no image upload.
 
 React 19 · TypeScript · Vite · Tailwind CSS 4 · onnxruntime-web · Zustand · fflate.
 
+## Local inference server (recommended)
+
+The AI work can run in a small server on **your own PC** instead of in the browser tab, so the page only sends images and shows results.
+Start both with one command:
+
+```bash
+npm ci
+npm run app        # inference server on 127.0.0.1:8787 + the web page on 127.0.0.1:5173
+```
+
+- **Models:** the server downloads each model once into `server/models/` (git-ignored) and keeps it loaded.
+- **GPU:** each model is tried on the GPU first (DirectML on Windows, CUDA on Linux, set `ORT_PROVIDERS=cuda,cpu` to override) with a test run;
+  a model the GPU cannot run falls back to the native CPU on its own. On an RTX 4060 (8 GB): BiRefNet-lite runs on the GPU in fp16 at full 1024 px,
+  LaMa runs on the native CPU because its FFT layers fail on DirectML.
+- **Safety:** the server listens on 127.0.0.1 only and rejects requests from pages that are not served from this PC.
+- **No server?** If it is not running, the page falls back to the in-browser engines (WebGPU/WebAssembly) as before. `?device=browser` forces that.
+- **Environment:** `INFERENCE_PORT` (default 8787), `MODEL_DIR`, `MODEL_HOST`, `ORT_PROVIDERS`; `VITE_INFERENCE_URL` points the page at another address.
+- Not yet moved to the server: AI upscaling (Enhance) and OCR still run in the browser.
+
 ## Installation
 
 Requirements: [Node.js](https://nodejs.org) 22.12 or newer (24 recommended), npm, and a current Chrome/Edge (WebGPU) — Firefox/Safari work on the slower CPU path.

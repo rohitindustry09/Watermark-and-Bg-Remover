@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { resume } from '../lib/resume'
+import { useRef, useState } from 'react'
 import { useStudio, type Tool } from '../state/studio'
 import { useWm } from '../wm/store'
 import { MODEL_LIST, PROFILES, type Profile } from '../lib/models'
+import { MAX_WORKERS, shares } from '../lib/workers'
 import { Btn, Section, Segmented, Select, Slider, Toggle } from './ui'
 
 const TOOLS: { id: Tool; label: string; key: string; hint: string }[] = [
@@ -88,7 +88,7 @@ export function LeftPanel() {
             Import
           </Btn>
         </form>
-        <p className="text-[11.5px] leading-snug text-muted">PNG, JPG, WebP, GIF, BMP, AVIF (and TIFF/HEIC only where your browser can decode them). Max 60 MB, 80 MP.</p>
+        <p className="text-[11.5px] leading-snug text-muted">PNG, JPG, WebP, GIF, BMP, AVIF (and TIFF/HEIC only where your browser can decode them). Up to 80 MP per image; ZIPs of any size.</p>
       </Section>
 
       <Section title="Watermark removal">
@@ -116,13 +116,25 @@ export function LeftPanel() {
         <Btn variant="primary" onClick={s.recreateClean} disabled={!s.wmAuthorized} title="Turns on Thorough + the AI detector, then re-runs the selected image: watermark removed first, then the background">
           Recreate clean image (no watermark, no background)
         </Btn>
-        <SavedProgress />
+        {s.learnedColours > 0 && (
+          <p className="text-[11.5px] leading-snug text-muted" role="status">
+            Learned {s.learnedColours} watermark colour{s.learnedColours === 1 ? '' : 's'} from this batch; it uses them to finish broken or half-hidden lettering.{' '}
+            <button type="button" className="underline" onClick={s.forgetLearned}>
+              Forget
+            </button>
+          </p>
+        )}
         {item?.watermark && (
           <div className="rounded border border-line px-2 py-1.5 text-[11.5px]" role="status">
             <p>
               Watermark scan: {item.watermark.found} candidate{item.watermark.found === 1 ? '' : 's'}, <b>{item.watermark.removed} removed</b>
               {item.watermark.methods.length ? ` (${item.watermark.methods.join(' + ')})` : ''}.
             </p>
+            {!!item.watermark.patterns?.length && (
+              <p className="text-muted" title={item.watermark.patterns.map((p) => `${p.id} ${p.name}: ${p.evidence}`).join('\n')}>
+                Patterns: {item.watermark.patterns.map((p) => `${p.id} ${p.name.replace(/ Watermark$/, '')}`).join(' · ')}
+              </p>
+            )}
             {item.watermark.shared && <p className="text-muted">Used the marks learned from earlier images in this batch (re-checked on this image), so OCR was skipped.</p>}
             {item.watermark.skipped.map((t) => (
               <p key={t} className="text-muted">
@@ -161,7 +173,7 @@ export function LeftPanel() {
           {model.description} <span className="text-fg">Licence: {model.license}.</span> {model.licenseNote}
         </p>
         {!model.commercialUse && <p className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11.5px] text-warn">Non-commercial weights. Switch to BiRefNet-lite or MODNet for commercial work.</p>}
-        {model.gpuOnly && s.device?.device !== 'webgpu' && <p className="text-[11.5px] text-warn">This model needs WebGPU; MODNet will be used on this device.</p>}
+        {model.gpuOnly && s.device?.device === 'wasm' && <p className="text-[11.5px] text-warn">This model needs WebGPU; MODNet will be used on this device.</p>}
         <p className="text-[11.5px] leading-snug text-muted">
           Weights download once from {new URL(import.meta.env.VITE_MODEL_HOST ?? 'https://huggingface.co').host} and are cached in your browser. Images stay on this device.
         </p>
@@ -207,6 +219,20 @@ export function LeftPanel() {
       </Section>
 
       <Section title="Batch queue">
+        <div className="space-y-1">
+          <div className="flex items-baseline justify-between">
+            <span className="text-fg">Workers</span>
+            <span className="text-[11.5px] text-muted">
+              {queued + (s.busy ? 1 : 0) > 1 ? `≈ ${shares(queued + (s.busy ? 1 : 0), s.workers)[0].toLocaleString()} images each` : `${s.workers} at a time`}
+            </span>
+          </div>
+          <Segmented<string>
+            label="Workers"
+            value={String(s.workers)}
+            onChange={(v) => s.setWorkers(Number(v))}
+            options={Array.from({ length: MAX_WORKERS }, (_, i) => ({ value: String(i + 1), label: String(i + 1), title: `Process ${i + 1} image${i ? 's' : ''} at the same time` }))}
+          />
+        </div>
         <div className="grid grid-cols-2 gap-1.5">
           {s.paused ? <Btn onClick={s.resume}>Resume</Btn> : <Btn onClick={s.pause} disabled={!s.busy && !queued}>Pause</Btn>}
           <Btn variant="danger" onClick={s.cancelAll} disabled={!queued && !s.busy}>
@@ -219,29 +245,25 @@ export function LeftPanel() {
             Apply to all
           </Btn>
         </div>
-        <p className="text-[11.5px] text-muted">
-          {s.items.length} image{s.items.length === 1 ? '' : 's'} · {queued} waiting · one image is segmented at a time to bound memory.
+        <p className="text-[11.5px] leading-snug text-muted">
+          {s.items.length} image{s.items.length === 1 ? '' : 's'} · {queued} waiting. The workers share one queue, so the work splits itself evenly: with 2 workers each takes the next waiting image, about half the batch each. The GPU runs one AI step at a time, so gains level off once it is busy.
         </p>
+        <Toggle
+          label="Save processed results (resume)"
+          checked={s.cacheResults}
+          onChange={s.setCacheResults}
+          hint="Off by default: nothing is stored. On: each finished image's result is kept in this browser, so adding the same files again later restores them instead of reprocessing. Changing the model, profile or watermark settings, or clicking Recreate / Reprocess, always processes fresh."
+        />
+        {s.cacheResults && (
+          <p className="text-[11.5px] leading-snug text-muted" role="status">
+            {s.cacheCount.toLocaleString()} saved result{s.cacheCount === 1 ? '' : 's'}.{' '}
+            <button type="button" className="underline" onClick={() => void s.clearCache()} disabled={!s.cacheCount}>
+              Clear saved results
+            </button>{' '}
+            to refresh everything.
+          </p>
+        )}
       </Section>
     </div>
-  )
-}
-
-/** Finished watermark-removal and export results kept in this browser so an interrupted batch can resume. */
-function SavedProgress() {
-  const [count, setCount] = useState(0)
-  const busy = useStudio((s) => s.busy)
-  const exporting = useStudio((s) => s.exportProgress)
-  useEffect(() => {
-    void resume.count().then(setCount)
-  }, [busy, exporting])
-  if (!count) return null
-  return (
-    <p className="text-[11.5px] text-muted" role="status">
-      {count} finished step{count === 1 ? '' : 's'} saved in this browser: if the page closes mid-batch, add the same files again and they are not redone.{' '}
-      <button type="button" className="underline" onClick={() => void resume.clear().then(() => setCount(0))}>
-        Clear
-      </button>
-    </p>
   )
 }

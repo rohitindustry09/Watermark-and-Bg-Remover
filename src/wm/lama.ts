@@ -1,5 +1,7 @@
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
 import { InferError, inferClient, type InferSession } from '../lib/inferClient'
+import { createGpuInferSession, gpuAvailable } from '../lib/gpuInfer'
+import { openServerSession } from '../lib/serverClient'
 
 export const LAMA = {
   name: 'LaMa (big-lama)',
@@ -46,16 +48,121 @@ inferClient.onReset(() => {
   loading = null
 })
 
-/** LaMa runs on the CPU in the inference worker: its FFT ops are poorly supported by the WebGPU provider, and a worker keeps the page responsive. */
+/** A GPU run of one 512 px fill normally takes well under a second; past this the GPU is abandoned for the CPU worker. */
+const GPU_RUN_TIMEOUT_MS = 45_000
+
+let gpuOff: string | null = null // set for the rest of this page session once the GPU path misbehaves
+
+/** `?lama=cpu` forces the CPU worker, `?device=cpu` disables every GPU path. */
+function lamaGpuWanted(): boolean {
+  const q = new URLSearchParams(globalThis.location?.search ?? '')
+  return !gpuOff && q.get('lama') !== 'cpu' && q.get('device') !== 'cpu'
+}
+
+/** Which backend the last LaMa session ended up on, for the UI/logs. */
+export let lamaBackend: 'webgpu' | 'cpu' | null = null
+
+/**
+ * Checks a freshly compiled GPU session on a synthetic image (smooth gradient, small hole): the output must be finite and, away from the hole,
+ * must match the input. A provider that mis-executes an op (LaMa uses FFT ops that WebGPU only partly supports) shows up here as NaNs or garbage
+ * instead of silently producing bad fills.
+ */
+export async function lamaGpuLooksCorrect(session: InferSession): Promise<boolean> {
+  const n = LAMA.size
+  const plane = n * n
+  const image = new Float32Array(3 * plane)
+  const mask = new Float32Array(plane)
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x
+      image[i] = x / n
+      image[plane + i] = y / n
+      image[2 * plane + i] = 0.5
+      if (Math.abs(x - 256) < 24 && Math.abs(y - 256) < 24) mask[i] = 1
+    }
+  }
+  const out = await runLama(session, image, mask)
+  let err = 0
+  let count = 0
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (Math.abs(x - 256) < 48 && Math.abs(y - 256) < 48) continue // the hole and its immediate surroundings
+      const i = y * n + x
+      for (let c = 0; c < 3; c++) {
+        const v = out[c * plane + i]
+        if (!Number.isFinite(v)) return false
+        err += Math.abs(v - image[c * plane + i])
+        count++
+      }
+    }
+  }
+  return err / count < 0.06
+}
+
+async function loadCpu(bytes: Uint8Array, signal?: AbortSignal): Promise<InferSession> {
+  try {
+    const s = await inferClient.create(bytes, 240_000, signal)
+    lamaBackend = 'cpu'
+    return s
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e)
+    throw new LamaError(/memory|alloc/i.test(msg) ? 'Not enough memory to load the LaMa model.' : `LaMa could not be initialised: ${msg}`, /memory|alloc/i.test(msg) ? 'oom' : 'unavailable')
+  }
+}
+
+/** GPU session that moves itself to the CPU worker on the first failed run, so a flaky GPU costs one retry instead of the whole batch. */
+function withCpuFallback(gpu: InferSession, onDownload?: ProgressFn): InferSession {
+  let active: InferSession = gpu
+  let cpu: Promise<InferSession> | null = null
+  return {
+    inputNames: gpu.inputNames,
+    outputNames: gpu.outputNames,
+    async run(feeds, timeoutMs, signal) {
+      if (active === gpu) {
+        try {
+          return await gpu.run(feeds, Math.min(timeoutMs, GPU_RUN_TIMEOUT_MS), signal)
+        } catch (e) {
+          if (signal?.aborted) throw e
+          gpuOff = (e as Error)?.message ?? String(e)
+          gpu.release()
+          cpu ??= loadModelBytes(lamaUrl, onDownload, signal).then((b) => loadCpu(b, signal))
+          active = await cpu
+        }
+      }
+      return active.run(feeds, timeoutMs, signal)
+    },
+    release() {
+      gpu.release()
+      void cpu?.then((s) => s.release()).catch(() => undefined)
+    },
+  }
+}
+
+/** LaMa runs on the GPU (WebGPU) when it is available and passes the self-check, otherwise on the CPU in the inference worker. */
 export function loadLama(onDownload?: ProgressFn, signal?: AbortSignal): Promise<InferSession> {
   loading ??= (async () => {
-    const bytes = await loadModelBytes(lamaUrl, onDownload, signal)
-    try {
-      return await inferClient.create(bytes, 240_000, signal)
-    } catch (e) {
-      const msg = (e as Error)?.message ?? String(e)
-      throw new LamaError(/memory|alloc/i.test(msg) ? 'Not enough memory to load the LaMa model.' : `LaMa could not be initialised: ${msg}`, /memory|alloc/i.test(msg) ? 'oom' : 'unavailable')
+    // Preferred: the local inference server (GPU where it works for this model, native CPU otherwise).
+    const remote = await openServerSession(lamaUrl, signal)
+    if (remote) {
+      lamaBackend = 'cpu'
+      return remote
     }
+    const bytes = await loadModelBytes(lamaUrl, onDownload, signal)
+    if (lamaGpuWanted() && (await gpuAvailable())) {
+      try {
+        const gpu = await createGpuInferSession(bytes)
+        if (await lamaGpuLooksCorrect(gpu)) {
+          lamaBackend = 'webgpu'
+          return withCpuFallback(gpu, onDownload)
+        }
+        gpu.release()
+        gpuOff = 'self-check failed'
+      } catch (e) {
+        if (signal?.aborted) throw e
+        gpuOff = (e as Error)?.message ?? String(e)
+      }
+    }
+    return loadCpu(bytes, signal)
   })()
   loading.catch(() => {
     loading = null

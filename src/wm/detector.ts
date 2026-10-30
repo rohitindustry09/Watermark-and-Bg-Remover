@@ -1,5 +1,6 @@
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
 import { inferClient, type InferSession } from '../lib/inferClient'
+import { openServerSession } from '../lib/serverClient'
 import type { Box } from './overlay'
 
 /**
@@ -25,6 +26,8 @@ inferClient.onReset(() => {
 
 export function loadDetector(onDownload?: ProgressFn, signal?: AbortSignal): Promise<InferSession> {
   session ??= (async () => {
+    const remote = await openServerSession(detectorUrl, signal)
+    if (remote) return remote
     const bytes = await loadModelBytes(detectorUrl, onDownload, signal)
     return inferClient.create(bytes, 120_000, signal)
   })()

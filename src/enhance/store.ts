@@ -11,6 +11,16 @@ export interface EnhanceSettings {
   denoise: number
   sharpen: number
   autoTone: boolean
+  /** Keep the original's tone and colours (default): the enhancer adds detail, not contrast or colour shifts. */
+  keepColours: boolean
+  /** Colour grade applied to every export, enhanced or not. 1 = the original saturation. */
+  saturation: number
+  /** 0..1: pull the colours toward gold. 0 = off. */
+  warmth: number
+  /** S-curve contrast on the subject's brightness. 1 = unchanged. */
+  contrast: number
+  /** 0..1: lift the bright tones (polished-metal glints). 0 = off. */
+  highlights: number
 }
 
 interface EnhanceState extends EnhanceSettings {
@@ -27,6 +37,11 @@ export const useEnhance = create<EnhanceState>((set) => ({
   denoise: 0.2,
   sharpen: 0.35,
   autoTone: true,
+  keepColours: true,
+  saturation: 1,
+  warmth: 0,
+  contrast: 1,
+  highlights: 0,
   progress: null,
   lastNote: null,
   set(p) {

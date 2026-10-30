@@ -23,7 +23,8 @@ export function buildCutout(source: ImageData, alpha: Float32Array, decontaminat
   let est: Float32Array[] | null = null
   let weight: Float32Array | null = null
   if (decontaminate > 0) {
-    const radius = Math.max(2, Math.round(Math.max(w, h) / 400))
+    // Wide enough to reach every soft edge pixel from the solid subject beside it (a narrow reach left the outer part of the ring untouched).
+    const radius = Math.max(3, Math.round(Math.max(w, h) / 250))
     const wgt = new Float32Array(n)
     for (let i = 0; i < n; i++) wgt[i] = alpha[i] >= 0.95 ? 1 : 0
     weight = boxBlur(wgt, w, h, radius)
@@ -40,7 +41,9 @@ export function buildCutout(source: ImageData, alpha: Float32Array, decontaminat
     let g = src[o + 1]
     let b = src[o + 2]
     if (est && weight && a < 0.95 && weight[i] > 0.02) {
-      const k = decontaminate * (1 - a / 0.95)
+      // A soft edge pixel is a mix of subject and old backdrop, and the model's opacity understates how much backdrop is in it, so the old colour is
+      // replaced by the nearby subject colour almost completely (the opacity still gives the edge its shape). A weak pull left a pale halo.
+      const k = Math.min(1, decontaminate * 1.4) * (1 - 0.3 * Math.min(1, a / 0.95))
       const inv = 1 / weight[i]
       r += (est[0][i] * inv - r) * k
       g += (est[1][i] * inv - g) * k

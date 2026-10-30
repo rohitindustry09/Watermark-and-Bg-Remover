@@ -12,6 +12,13 @@ export function EnhancePanel({ width, height }: { width?: number; height?: numbe
   const e = useEnhance()
   const plan = width && height ? planEnhance(width, height, e.target, e.ai, SR_MODEL.tile, SR_MODEL.margin) : null
   return (
+    <>
+    <Section title="Colour">
+      <Slider label="Saturation" value={e.saturation} min={0.5} max={2} step={0.05} onChange={(saturation) => e.set({ saturation })} hint="1 = the original colours. Raise it for richer colour." />
+      <Slider label="Contrast" value={e.contrast} min={0.7} max={1.6} step={0.05} onChange={(contrast) => e.set({ contrast })} hint="1 = the original. Above 1 deepens shadows and brightens lights for a richer, more three-dimensional look; pure black and white are not clipped." />
+      <Slider label="Highlights" value={e.highlights} min={0} max={1} step={0.05} onChange={(highlights) => e.set({ highlights })} hint="0 = off. Lifts only the bright tones: the glint on polished metal, without touching the shadows." />
+      <Slider label="Golden warmth" value={e.warmth} min={0} max={1} step={0.05} onChange={(warmth) => e.set({ warmth })} hint="0 = off. Pulls the colours toward gold for a warmer, golden look; brightness is kept." />
+    </Section>
     <Section title="Enhance & upscale (4K)">
       <Toggle label="Enhance the exported image" checked={e.enabled} onChange={(enabled) => e.set({ enabled })} hint="Upscales and improves the clean, recreated image when you export it. Off by default." />
       {e.enabled && (
@@ -41,7 +48,8 @@ export function EnhancePanel({ width, height }: { width?: number; height?: numbe
           )}
           <Slider label="Denoise" value={e.denoise} min={0} max={1} step={0.05} onChange={(denoise) => e.set({ denoise })} hint="Edge-preserving noise reduction, applied before upscaling so noise is not enlarged" />
           <Slider label="Sharpen" value={e.sharpen} min={0} max={1} step={0.05} onChange={(sharpen) => e.set({ sharpen })} hint="Unsharp mask at the output size" />
-          <Toggle label="Auto tone" checked={e.autoTone} onChange={(autoTone) => e.set({ autoTone })} hint="Gentle automatic levels; capped so dark or bright products are not blown out" />
+          <Toggle label="Keep original colours" checked={e.keepColours} onChange={(keepColours) => e.set({ keepColours })} hint="The enhancer adds detail but not contrast or colour shifts: the export keeps the original's brightness and saturation. Turn off to let the enhancer set its own look." />
+          {!e.keepColours && <Toggle label="Auto tone" checked={e.autoTone} onChange={(autoTone) => e.set({ autoTone })} hint="Gentle automatic levels; capped so dark or bright products are not blown out" />}
           {plan && (
             <p className="text-[11.5px] leading-snug text-muted" role="status">
               {width}×{height} → <span className="font-mono text-fg">{plan.outW}×{plan.outH}</span>
@@ -69,5 +77,6 @@ export function EnhancePanel({ width, height }: { width?: number; height?: numbe
         </>
       )}
     </Section>
+    </>
   )
 }

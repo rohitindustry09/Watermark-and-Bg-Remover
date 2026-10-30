@@ -20,15 +20,21 @@ import { dirOf, joinPath } from '../lib/paths'
 import { makeGate } from '../lib/throttle'
 import { autoRemoveWatermarks, type AutoWatermarkReport } from '../wm/auto'
 import { SharedMarkPlanner } from '../wm/batch'
+import { clearStains, clearStrayMarks } from '../wm/strays'
+import { forgetLearnedPalette, learnedPalette } from '../wm/chroma'
 import { lamaAllowedByDefault } from '../wm/lama'
 import { fingerprint, resume, settingsHash } from '../lib/resume'
-import { useEnhance } from '../enhance/store'
-import { applyEnhance, canvasStats, cancelEnhance } from '../enhance/apply'
+import { CACHE_VERSION, cropRgba, diffBox, packMatte, pasteRgba, unpackMatte, type PatchBox } from '../lib/cache'
+import { clampWorkers, idsToStart } from '../lib/workers'
+import { wmClient } from '../wm/wmClient'
+import { setOcrPoolSize } from '../wm/ocr'
+import { applyEnhance, canvasStats, cancelEnhance, currentGrade, gradeCanvas } from '../enhance/apply'
 import { composeFullResolution, composeResult } from '../wm/restore'
 import {
   canvasFrom,
   computeSession,
   createSession,
+  dequantize,
   disposeSession,
   MAX_RAW_ASSETS,
   quantize,
@@ -58,6 +64,8 @@ export interface Item {
   excluded: number[]
   analysis?: Analysis
   timing?: { ms: number; device: string; precision: string; model: string; version: string }
+  /** Restored from the saved-results cache instead of being processed. */
+  cached?: boolean
 }
 
 export interface ExportSettings {
@@ -111,8 +119,16 @@ interface Studio {
   coverage: number
   lastExport: { name: string; check: AlphaCheck; bytes: number } | null
   exportProgress: { done: number; total: number; startedAt: number } | null
-  /** Milliseconds each finished image took to process, in order, for the time-remaining estimate. */
+  /** Milliseconds between finished images, in order, for the time-remaining estimate (with several workers this is the batch's real pace). */
   procMs: number[]
+  /** Images processed at the same time (1-5). They share one queue, so the work divides itself evenly. */
+  workers: number
+  /** Keep each finished image's result in this browser so adding the same files again restores them instead of reprocessing. Off by default. */
+  cacheResults: boolean
+  /** Saved results currently in the browser. */
+  cacheCount: number
+  /** Watermark colours the tool has learned from the images of this batch (it completes broken lettering with them). */
+  learnedColours: number
   notice: string | null
 
   init(): void
@@ -140,6 +156,10 @@ interface Studio {
   resume(): void
   cancelAll(): void
   retry(ids?: string[]): void
+  setWorkers(n: number): void
+  setCacheResults(on: boolean): void
+  clearCache(): Promise<void>
+  forgetLearned(): void
   exportActive(): Promise<void>
   exportAll(): Promise<void>
   dismissNotice(): void
@@ -149,7 +169,6 @@ let session: Session | null = null
 let abort = new AbortController()
 let computing = false
 let queued = false
-let pumping = false
 
 export const getSession = (): Session | null => session
 
@@ -175,6 +194,34 @@ function messageOfInner(e: unknown): string {
 const markPlanner = new SharedMarkPlanner(3)
 /** Model downloads report per network chunk; showing every one re-renders the whole UI hundreds of times a second. */
 const downloadGate = makeGate(150)
+
+const CACHE_PREF = 'cutout-studio:cache-results'
+/** The "save processed results" tick-box is remembered across reloads (it is a preference; the results themselves are only stored while it is on). */
+const readCachePref = (): boolean => {
+  try {
+    return localStorage.getItem(CACHE_PREF) === '1'
+  } catch {
+    return false
+  }
+}
+const writeCachePref = (on: boolean): void => {
+  try {
+    localStorage.setItem(CACHE_PREF, on ? '1' : '0')
+  } catch {
+    // storage unavailable: the choice only lasts for this session
+  }
+}
+
+/** What is saved beside a matte so the image can be restored without processing. */
+interface CachedMeta {
+  v: string
+  w: number
+  h: number
+  timing?: Item['timing']
+  report?: AutoWatermarkReport
+  /** Region the watermark repair changed, in full-resolution pixels; the repaired pixels themselves are a small PNG saved separately. */
+  patch: (PatchBox & { fullW: number; fullH: number }) | null
+}
 /** Upper bound for the watermark stage of one image (detection plus every fill), so one bad image cannot hold up a whole batch. */
 const WATERMARK_STAGE_TIMEOUT_MS = 8 * 60_000
 
@@ -236,11 +283,18 @@ export const useStudio = create<Studio>((set, get) => {
       let source = decoded.source
       const wantWm = get().removeWatermarks && get().wmAuthorized
       const thumb = item.thumb ?? (await makeThumbnail(source))
-      patchItem(id, { info, thumb, status: 'loading-model' })
+      // Saved results (opt-in): a hit restores the finished image; a refresh (Recreate / Reprocess) skips the lookup but still saves the new result.
+      const saveOn = get().cacheResults
+      const key = saveOn ? await cacheKey(upload, maxEdge, wantWm) : ''
+      const bypass = skipCache.delete(id)
+      if (saveOn && !bypass && (await restoreFromCache(id, upload, maxEdge, key, source, info, thumb))) return
+      let wmReport: AutoWatermarkReport | undefined
+      let cachedPatch: { box: PatchBox; fullW: number; fullH: number; blob: Promise<Blob> } | null = null
+      patchItem(id, { info, thumb, status: 'loading-model', cached: false })
       let modelId = get().modelId
       const run = async (src: ImageData) => {
         patchItem(id, { status: 'loading-model' })
-        if (MODELS[modelId].gpuOnly && (await detectDevice()).device !== 'webgpu') {
+        if (MODELS[modelId].gpuOnly && (await detectDevice()).device === 'wasm') {
           modelId = CPU_FALLBACK
           set({ notice: `${MODELS[get().modelId].name} needs WebGPU, so ${MODELS[CPU_FALLBACK].name} was used on the CPU instead (it handles products and objects; ${MODELS[CPU_FALLBACK].licenseNote}). Pick another model in the sidebar to change this.` })
         }
@@ -266,18 +320,9 @@ export const useStudio = create<Studio>((set, get) => {
       let out = await segmentNow(source)
       if (wantWm) {
         patchItem(id, { status: 'cleaning' })
-        const quick = (warning: string): AutoWatermarkReport => ({ found: 0, removed: 0, skipped: [], methods: [], warnings: [warning], ms: 0 })
         try {
-          const wmKey = `${item.dir}|${await fingerprint(upload)}|${settingsHash({ v: 2, m: modelId, t: get().wmThorough, d: get().wmUseDetector, o: get().wmIncludeOwnership, l: get().wmUseLama, k: get().bg.kind === 'blur', e: maxEdge })}`
-          const saved = await resume.get('wm', wmKey)
-          if (saved) {
-            // Finished earlier (this run or a previous session): an empty blob means "no watermark found".
-            if (saved.blob.size > 0) {
-              const cleaned = new File([saved.blob], upload.name, { type: 'image/png' })
-              source = (await decodeFile(cleaned, maxEdge)).source
-              patchItem(id, { file: cleaned, origFile: upload, watermark: quick('Watermark removal restored from saved progress.') })
-            } else patchItem(id, { file: upload, origFile: undefined, watermark: quick('No watermark found (saved result).') })
-          } else {
+          {
+            // Always a fresh scan: nothing from an earlier run is stored or reused.
             // The stage is bounded: if it overruns, it is cancelled and the image continues without watermark removal instead of stalling the batch.
             const stage = new AbortController()
             const onAbort = () => stage.abort()
@@ -303,13 +348,25 @@ export const useStudio = create<Studio>((set, get) => {
               const canvas = new OffscreenCanvas(finalImg.width, finalImg.height)
               canvas.getContext('2d')!.putImageData(finalImg, 0, 0)
               const blob = await canvas.convertToBlob({ type: 'image/png' })
+              if (saveOn) {
+                // Only the region the repair changed is kept, as a small PNG: restoring pastes it back onto the untouched upload.
+                const box = diffBox(full.data, finalImg.data, finalImg.width, finalImg.height)
+                if (box) {
+                  const crop = cropRgba(finalImg.data, finalImg.width, box)
+                  const pc = new OffscreenCanvas(box.w, box.h)
+                  pc.getContext('2d')!.putImageData(new ImageData(crop as Uint8ClampedArray<ArrayBuffer>, box.w, box.h), 0, 0)
+                  cachedPatch = { box, fullW: finalImg.width, fullH: finalImg.height, blob: pc.convertToBlob({ type: 'image/png' }) }
+                }
+              }
+              wmReport = report
               source = composeResult(source, result)
               patchItem(id, { file: new File([blob], upload.name, { type: 'image/png' }), origFile: upload, watermark: report })
-              void resume.put('wm', wmKey, blob)
-              // The first cutout is kept: repainting a watermark does not change the subject's outline, and cutting the image out again would cost a third of the time.
+              // Cut out again from the cleaned image: the first matte was computed with the watermark present, and models keep bold coloured text as
+              // foreground, so reusing it would leave the text-shaped alpha (and any colour left in it) in the result.
+              out = await segmentNow(source)
             } else {
+              wmReport = report
               patchItem(id, { file: upload, origFile: undefined, watermark: report })
-              void resume.put('wm', wmKey, new Blob([]))
             }
           }
         } catch (e) {
@@ -322,6 +379,11 @@ export const useStudio = create<Studio>((set, get) => {
       }
       const { res } = out
       const raw = resamplePlane(res.matte, res.outW, res.outH, source.width, source.height)
+      // Watermark runs: coloured overlay text can be kept as foreground; thin detached pieces that clash with the subject's colour are dropped.
+      if (wantWm) {
+        clearStrayMarks(raw, source.data, source.width, source.height)
+        clearStains(raw, source.data, source.width, source.height)
+      }
       const analysis = analyseMatte(raw, source.width, source.height)
       rawAssets.set(id, { raw: quantize(raw), w: source.width, h: source.height, workEdge: maxEdge })
       evictOldAssets(id)
@@ -330,6 +392,7 @@ export const useStudio = create<Studio>((set, get) => {
         analysis,
         timing: { ms: res.ms, device: res.device, precision: res.precision, model: MODELS[modelId].name, version: res.modelVersion },
       })
+      if (saveOn) void saveResult(id, key, wmReport, cachedPatch)
       if (!get().activeId) await get().openItem(id)
       else if (get().activeId === id) await get().openItem(id)
     } catch (e) {
@@ -348,24 +411,96 @@ export const useStudio = create<Studio>((set, get) => {
     }
   }
 
-  async function pump(): Promise<void> {
-    if (pumping) return
-    pumping = true
-    set({ busy: true })
+  // ---- saved results (opt-in) ----------------------------------------------------------------------------------------------------
+  /** Images whose next run must ignore the cache (a refresh the user asked for). */
+  const skipCache = new Set<string>()
+  /** One 'seg' entry per finished image (each may also have a small repair patch), so this is the number of saved images. */
+  const refreshCacheCount = (): void => void resume.countStage('seg').then((n) => set({ cacheCount: n }))
+
+  /** Same image content + same settings that change the result = same key. Anything else misses and is processed normally. */
+  async function cacheKey(upload: File, maxEdge: number, wantWm: boolean): Promise<string> {
+    const st = get()
+    const wm = wantWm ? [st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership, st.wmUseLama, st.bg.kind === 'blur'] : 0
+    return `${await fingerprint(upload)}|${settingsHash({ v: CACHE_VERSION, m: st.modelId, e: maxEdge, wm })}`
+  }
+
+  async function saveResult(id: string, key: string, report: AutoWatermarkReport | undefined, patch: { box: PatchBox; fullW: number; fullH: number; blob: Promise<Blob> } | null): Promise<void> {
+    const asset = rawAssets.get(id)
+    if (!asset) return
+    const timing = get().items.find((i) => i.id === id)?.timing
+    const meta: CachedMeta = { v: CACHE_VERSION, w: asset.w, h: asset.h, timing, report, patch: patch ? { ...patch.box, fullW: patch.fullW, fullH: patch.fullH } : null }
+    // The patch goes first, so a saved matte always has its patch.
+    if (patch) await resume.put('patch', key, await patch.blob)
+    await resume.put('seg', key, packMatte(asset.raw), JSON.stringify(meta))
+    refreshCacheCount()
+  }
+
+  /** Restores a finished image from the saved results. False (and nothing changed) when there is none, or it no longer fits this image. */
+  async function restoreFromCache(id: string, upload: File, maxEdge: number, key: string, source: ImageData, info: ImageInfo, thumb: string): Promise<boolean> {
     try {
-      for (;;) {
-        const st = get()
-        if (st.paused) break
-        const next = st.items.find((i) => i.status === 'queued')
-        if (!next) break
-        const t0 = performance.now()
-        await processItem(next.id)
-        if (get().items.find((i) => i.id === next.id)?.status === 'done') set((s) => ({ procMs: [...s.procMs, performance.now() - t0] }))
+      const seg = await resume.get('seg', key)
+      if (!seg?.meta) return false
+      const meta = JSON.parse(seg.meta) as CachedMeta
+      if (meta.v !== CACHE_VERSION || meta.w !== source.width || meta.h !== source.height) return false
+      const raw = await unpackMatte(seg.blob, meta.w, meta.h)
+      if (!raw) return false
+      let file = upload
+      let origFile: File | undefined
+      if (meta.patch) {
+        const saved = await resume.get('patch', key)
+        if (!saved) return false
+        const full = info.downscaled ? (await decodeFile(upload, Number.POSITIVE_INFINITY)).source : source
+        if (full.width !== meta.patch.fullW || full.height !== meta.patch.fullH) return false
+        const bmp = await createImageBitmap(saved.blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })
+        if (bmp.width !== meta.patch.w || bmp.height !== meta.patch.h) return false
+        const pc = new OffscreenCanvas(bmp.width, bmp.height)
+        const pctx = pc.getContext('2d', { willReadFrequently: true })!
+        pctx.drawImage(bmp, 0, 0)
+        const pixels = new Uint8ClampedArray(full.data)
+        pasteRgba(pixels, full.width, meta.patch, pctx.getImageData(0, 0, bmp.width, bmp.height).data)
+        const canvas = new OffscreenCanvas(full.width, full.height)
+        canvas.getContext('2d')!.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, full.width, full.height), 0, 0)
+        file = new File([await canvas.convertToBlob({ type: 'image/png' })], upload.name, { type: 'image/png' })
+        origFile = upload
       }
-    } finally {
-      pumping = false
-      set({ busy: false })
+      rawAssets.set(id, { raw, w: meta.w, h: meta.h, workEdge: maxEdge })
+      evictOldAssets(id)
+      const report = meta.report && { ...meta.report, warnings: [...meta.report.warnings, 'Restored from saved results (no reprocessing).'] }
+      patchItem(id, { file, origFile, info, thumb, status: 'done', analysis: analyseMatte(dequantize(raw), meta.w, meta.h), timing: meta.timing, watermark: report, cached: true })
+      if (!get().activeId) await get().openItem(id)
+      else if (get().activeId === id) await get().openItem(id)
+      return true
+    } catch {
+      return false // a damaged entry just means the image is processed normally
     }
+  }
+
+  // ---- the worker queue ---------------------------------------------------------------------------------------------------------------
+  /** Images being processed right now. Up to `workers` run at once; each worker takes the next waiting image from the one shared queue. */
+  const running = new Set<string>()
+  let lastDoneAt = 0
+
+  function pump(): void {
+    const st = get()
+    if (st.paused) return
+    for (const id of idsToStart(st.items, running, st.workers)) {
+      if (running.size === 0) lastDoneAt = performance.now()
+      running.add(id)
+      patchItem(id, { status: 'decoding', error: undefined }) // claimed: it no longer reads as waiting
+      void processItem(id).finally(() => {
+        running.delete(id)
+        const now = performance.now()
+        if (get().items.find((i) => i.id === id)?.status === 'done') {
+          // The gap since the previous finish, not this image's own duration: with several workers that is the batch's real pace.
+          set((cur) => ({ procMs: [...cur.procMs, now - lastDoneAt] }))
+          lastDoneAt = now
+        }
+        set({ learnedColours: learnedPalette().length })
+        if (running.size === 0) set({ busy: false })
+        pump()
+      })
+    }
+    if (running.size > 0 && !get().busy) set({ busy: true })
   }
 
   /** Builds the final composite for one item at export resolution. */
@@ -401,7 +536,7 @@ export const useStudio = create<Studio>((set, get) => {
       }
       const bg: BackgroundSpec = format === 'jpeg' && st.bg.kind === 'transparent' ? { ...st.bg, kind: 'color', color: '#ffffff' } : st.bg
       const target = new OffscreenCanvas(1, 1)
-      renderComposite({ target, cutout, original, bounds, bg, shadow: st.shadow, layout: st.layout })
+      renderComposite({ target, cutout: gradeCanvas(cutout, currentGrade()), original, bounds, bg, shadow: st.shadow, layout: st.layout })
       // Never save a blank picture: the composite of a subject with real coverage must contain content.
       const composed = canvasStats(target)
       if (s.coverage > 1 && composed.std < 1 && composed.meanAlpha < 8) {
@@ -418,27 +553,9 @@ export const useStudio = create<Studio>((set, get) => {
     }
   }
 
-  /**
-   * Export with resume: a file already exported under the same image + settings (this run or an earlier, interrupted one) is reused.
-   * The key covers everything that changes the output, so editing a mask or switching background re-renders correctly.
-   */
+  /** Every export is rendered fresh from the current settings; no earlier result is stored or reused. */
   async function renderOrResume(it: Item): Promise<{ blob: Blob; check: AlphaCheck; name: string }> {
-    const st = get()
-    let key: string | null = null
-    try {
-      const { progress: _p, lastNote: _n, ...enhance } = useEnhance.getState() as unknown as Record<string, unknown>
-      key = `${it.dir}|${await fingerprint(it.origFile ?? it.file)}|${settingsHash({ bg: st.bg, shadow: st.shadow, layout: st.layout, x: st.exportSettings, enhance, p: it.params, h: it.history.ops, ex: it.excluded, m: st.modelId, pr: st.profile, w: [st.removeWatermarks, st.wmThorough, st.wmUseDetector, st.wmIncludeOwnership, st.wmUseLama] })}`
-      const saved = await resume.get('export', key)
-      if (saved?.meta) {
-        const m = JSON.parse(saved.meta) as { name: string; check: AlphaCheck }
-        return { blob: saved.blob, name: m.name, check: m.check }
-      }
-    } catch {
-      key = null
-    }
-    const r = await renderItem(it.id)
-    if (key) void resume.put('export', key, r.blob, JSON.stringify({ name: r.name, check: r.check }))
-    return r
+    return renderItem(it.id)
   }
 
   return {
@@ -479,17 +596,25 @@ export const useStudio = create<Studio>((set, get) => {
     lastExport: null,
     exportProgress: null,
     procMs: [],
+    workers: 1,
+    cacheResults: readCachePref(),
+    cacheCount: 0,
+    learnedColours: 0,
     notice: null,
 
     init() {
       void detectDevice().then((device) => set({ device }))
+      wmClient.setSize(get().workers)
+      setOcrPoolSize(get().workers)
+      if (get().cacheResults) refreshCacheCount()
     },
 
     async addFiles(files) {
       const { files: accepted, problems } = await expandInputs(files)
       if (!get().items.length) {
         markPlanner.reset()
-        set({ procMs: [] })
+        forgetLearnedPalette() // a new batch may be a different brand: start from what its own images show
+        set({ procMs: [], learnedColours: 0 })
       }
       const base = get().profile
       const items: Item[] = accepted.map((file) => ({
@@ -537,7 +662,7 @@ export const useStudio = create<Studio>((set, get) => {
         return
       }
       try {
-        const s = await createSession(id, item.file)
+        const s = await createSession(id, item.file, item.origFile)
         if (get().activeId !== id) {
           disposeSession(s)
           return
@@ -649,7 +774,29 @@ export const useStudio = create<Studio>((set, get) => {
       abort = new AbortController()
       set((s) => ({ items: s.items.map((i) => (i.status === 'queued' ? { ...i, status: 'cancelled' as Status } : i)) }))
     },
+    setWorkers(n) {
+      const workers = clampWorkers(n)
+      wmClient.setSize(workers)
+      setOcrPoolSize(workers)
+      set({ workers })
+      pump() // more workers: start more of the waiting images now (fewer: the extra ones simply finish and are not replaced)
+    },
+    setCacheResults(on) {
+      writeCachePref(on)
+      set({ cacheResults: on })
+      if (on) refreshCacheCount()
+    },
+    async clearCache() {
+      await resume.clear()
+      set({ cacheCount: 0 })
+    },
+    forgetLearned() {
+      forgetLearnedPalette()
+      set({ learnedColours: 0 })
+    },
     retry(ids) {
+      // An explicit retry/reprocess of chosen images is a refresh: it never reuses their saved result (but saves the new one).
+      for (const id of ids ?? []) skipCache.add(id)
       set((s) => ({
         paused: false,
         items: s.items.map((i) =>

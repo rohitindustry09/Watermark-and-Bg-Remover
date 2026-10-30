@@ -154,8 +154,25 @@ describe('resumable store', () => {
     expect(await r.get('wm', 'k4')).not.toBeNull()
   })
 
+  it('keeps every entry when it has no size limit (saved results are emptied by the user)', async () => {
+    const r = new ResumeStore(memoryBackend(), Number.POSITIVE_INFINITY)
+    for (let i = 0; i < 1200; i++) await r.put('seg', 'k' + i, blob('x'))
+    expect(await r.count()).toBe(1200)
+    expect(await r.get('seg', 'k0')).not.toBeNull()
+  })
+
+  it('counts saved images by kind, from the keys alone', async () => {
+    const r = new ResumeStore(memoryBackend(), Number.POSITIVE_INFINITY)
+    for (let i = 0; i < 5; i++) await r.put('seg', 'img' + i, blob('m'))
+    for (let i = 0; i < 3; i++) await r.put('patch', 'img' + i, blob('p'))
+    expect(await r.count()).toBe(8)
+    expect(await r.countStage('seg')).toBe(5)
+    expect(await r.countStage('patch')).toBe(3)
+    expect(await r.countStage('nothing')).toBe(0)
+  })
+
   it('never throws when storage fails', async () => {
-    const broken = { get: async () => { throw new Error('x') }, put: async () => { throw new Error('x') }, delete: async () => {}, list: async () => { throw new Error('x') }, clear: async () => { throw new Error('x') } }
+    const broken = { get: async () => { throw new Error('x') }, put: async () => { throw new Error('x') }, delete: async () => {}, list: async () => { throw new Error('x') }, count: async () => { throw new Error('x') }, keys: async () => { throw new Error('x') }, clear: async () => { throw new Error('x') } }
     const r = new ResumeStore(broken)
     await expect(r.put('wm', 'a', blob('x'))).resolves.toBeUndefined()
     expect(await r.get('wm', 'a')).toBeNull()

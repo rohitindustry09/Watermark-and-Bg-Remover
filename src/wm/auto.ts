@@ -5,6 +5,8 @@ import { toGray } from './overlay'
 import { buildMask } from './mask'
 import { groupKey, verifyMark, type SharedMarkPlanner } from './batch'
 import { restoreImage, type RestoreResult } from './restore'
+import { composeResult } from './compose'
+import { describePatterns, type PatternFinding } from './patterns'
 import { DEFAULT_WM_PARAMS, type Region } from './types'
 
 export interface AutoWatermarkReport {
@@ -21,6 +23,8 @@ export interface AutoWatermarkReport {
   shared?: boolean
   /** Marks found only on the background, left alone because the background is being removed anyway. */
   onBackground?: number
+  /** The watermark patterns evidenced by what was found, numbered as in the 100-pattern taxonomy (only visible, measurable ones; see patterns.ts). */
+  patterns?: PatternFinding[]
   /** What was removed: which detector found it, where, and how sure it was. */
   regions?: { kind: string; box: [number, number, number, number]; confidence: number }[]
 }
@@ -146,7 +150,7 @@ export async function autoRemoveWatermarks(
   const strongText = (r: Region): boolean => r.confidence >= 97 || ((r.colour ?? 0) >= 0.25 && r.confidence >= 85)
   const textBoxes = regions.filter((r) => r.kind === 'textdet' && (opts.thorough ? r.confidence >= 60 : strongText(r))).map((r) => r.box)
   const tintTrusted = (r: Region): boolean => {
-    if (r.text === 'coloured logo') return true
+    if (r.text === 'coloured logo' || r.text === 'coloured text') return true
     const bw = r.box[2] - r.box[0]
     const bh = r.box[3] - r.box[1]
     if (textBoxes.some((b) => boxShare(r.box, b) >= 0.5)) return false // the text detector's own stroke mask already covers this text, more precisely
@@ -173,7 +177,7 @@ export async function autoRemoveWatermarks(
       // and — unless Thorough — a size typical of a brand mark rather than a few letters on the product.
       const cov = r.coverage ?? 1
       const wide = r.box[2] - r.box[0] >= 0.08 * Math.max(w, h)
-      return { ...r, selected: (opts.thorough ? r.confidence >= 60 : strongText(r) && wide) && cov >= 0.04 && cov <= 0.9 }
+      return { ...r, selected: (opts.thorough ? r.confidence >= 85 || ((r.colour ?? 0) >= 0.2 && r.confidence >= 60) : strongText(r) && wide) && cov >= 0.04 && cov <= 0.9 }
     }
     // Rotated OCR reads photo texture as short "words" ("ol", "32", "/ WR"); a diagonal watermark has to read as real text to count.
     if (r.angle !== 0 && !plausibleText(r)) return { ...r, selected: false }
@@ -192,12 +196,39 @@ export async function autoRemoveWatermarks(
     const picked = chosen.filter((r) => r.selected)
     chosen = chosen.map((r) => (!r.selected && allowed.has(r.category) && r.kind === 'ocr' && r.angle === 0 && r.confidence >= 25 && picked.some((p) => near(r, p)) && looksLikeOverlay(r) ? { ...r, selected: true } : r))
   }
+  // A precise coloured-lettering mask beats the coarse text boxes (OCR / text detector) that cover the same words: their masks also catch the
+  // carving or lettering-coloured detail of whatever the words lie over, and repainting that destroys the subject. They keep only their pixels
+  // that lie on the precise mask (plus a small margin).
+  const lines = chosen.filter((r) => r.selected && r.text === 'coloured text')
+  if (lines.length) {
+    const lineMask = new Uint8Array(w * h)
+    for (const l of lines) {
+      const lw = l.box[2] - l.box[0]
+      for (let i = 0; i < l.mask.length; i++) if (l.mask[i]) lineMask[(l.box[1] + Math.floor(i / lw)) * w + l.box[0] + (i % lw)] = 1
+    }
+    const wide = dilateBinary(lineMask, w, h, 6)
+    chosen = chosen.map((r) => {
+      if (!r.selected || r.text === 'coloured text') return r
+      const share = Math.max(...lines.map((l) => boxShare(r.box, l.box)))
+      if (share >= 0.6) return { ...r, selected: false } // the precise lettering mask already covers these words
+      // Once the brand line is known precisely, a monochrome text-detector box elsewhere is far more likely carving or relief than a second watermark.
+      if (share < 0.3) return r.kind === 'textdet' && (r.colour ?? 0) < 0.2 && r.confidence < 99 ? { ...r, selected: false } : r
+      const rw = r.box[2] - r.box[0]
+      const mask = new Uint8Array(r.mask.length)
+      let kept = 0
+      for (let i = 0; i < r.mask.length; i++) {
+        if (!r.mask[i]) continue
+        if (wide[(r.box[1] + Math.floor(i / rw)) * w + r.box[0] + (i % rw)]) (mask[i] = 1), kept++
+      }
+      return kept > 0 ? { ...r, mask } : { ...r, selected: false }
+    })
+  }
   // Marks that sit only on the backdrop go away with it: skip them (saves a fill each, and cannot damage the subject).
   let onBackground = 0
   if (opts.focus) {
     const near = dilateBinary(opts.focus, w, h, 6)
     chosen = chosen.map((r) => {
-      if (!r.selected) return r
+      if (!r.selected || r.text === 'coloured text') return r // a precise line mask is always repainted whole: part of it may lie on the subject
       const rw = r.box[2] - r.box[0]
       let on = 0
       let total = 0
@@ -218,7 +249,28 @@ export async function autoRemoveWatermarks(
   const skipped = [...protectedText, ...(onBackground ? [`${onBackground} mark${onBackground === 1 ? '' : 's'} on the background (removed together with it)`] : []), ...chosen.filter((r) => !r.selected).map(skipReason).filter(Boolean)].slice(0, 8)
   const removed = chosen.filter((r) => r.selected).length
   if (!sharedUsed) opts.planner?.learn(key, chosen.filter((r) => r.selected))
-  const report: AutoWatermarkReport = { found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0, shared: sharedUsed || undefined, onBackground: onBackground || undefined, regions: chosen.filter((r) => r.selected).map((r) => ({ kind: r.kind, box: r.box, confidence: r.confidence })) }
+  const marksFor = chosen.filter((r) => r.selected)
+  const nearSubject = opts.focus ? dilateBinary(opts.focus, w, h, 6) : null
+  const patterns = describePatterns(
+    marksFor.map((r) => {
+      let onSubject: number | undefined
+      if (nearSubject) {
+        const rw = r.box[2] - r.box[0]
+        let total = 0
+        let on = 0
+        for (let i = 0; i < r.mask.length; i++) {
+          if (!r.mask[i]) continue
+          total++
+          if (nearSubject[(r.box[1] + Math.floor(i / rw)) * w + r.box[0] + (i % rw)]) on++
+        }
+        onSubject = total ? on / total : 0
+      }
+      return { kind: r.kind, text: r.text, category: r.category, box: r.box, angle: r.angle, tints: r.tints, onSubject }
+    }),
+    w,
+    h,
+  )
+  const report: AutoWatermarkReport = { patterns, found: chosen.length + protectedText.length, removed, skipped, methods: [], warnings: detectorWarning ? [detectorWarning] : [], ms: 0, shared: sharedUsed || undefined, onBackground: onBackground || undefined, regions: chosen.filter((r) => r.selected).map((r) => ({ kind: r.kind, box: r.box, confidence: r.confidence })) }
   if (!removed) {
     report.ms = performance.now() - t0
     return { result: null, report }
@@ -227,10 +279,32 @@ export async function autoRemoveWatermarks(
   // where the surroundings are textured, so a recreated rope/engraving stays sharp instead of being smoothed.
   const hasLarge = chosen.some((r) => r.selected && (r.kind === 'model' || r.kind === 'tint' || r.box[2] - r.box[0] > 120 || r.box[3] - r.box[1] > 60))
   const params = { ...DEFAULT_WM_PARAMS, method: 'auto' as const, expand: hasLarge ? 5 : DEFAULT_WM_PARAMS.expand }
-  const mask = buildMask(chosen, [], w, h, params)
+  // Bold coloured lettering (a brand name laid over the product) is repaired with LaMa in its own pass: a smooth fill smears the carving under it
+  // and patch fill tiles visibly, while small marks elsewhere stay on the fast exact repair.
+  const isLine = (r: Region): boolean => r.text === 'coloured text'
+  const lettering = opts.useLama === false ? [] : chosen.filter((r) => r.selected && isLine(r))
+  const mask = buildMask(lettering.length ? chosen.filter((r) => !lettering.includes(r)) : chosen, [], w, h, params)
   // With a subject mask, the backdrop is discarded afterwards, so the repair is told not to borrow its colours (a mark on the subject's edge was filled with pale backdrop).
   const unknown = opts.focus ? dilateBinary(opts.focus, w, h, 3).map((v) => 1 - v) : undefined
-  const result = await restoreImage(source, mask, params, { signal: opts.signal, onDownload: opts.onDownload, lama: opts.useLama, unknown })
+  const hooks = { signal: opts.signal, onDownload: opts.onDownload, lama: opts.useLama, unknown }
+  let result: RestoreResult
+  if (!lettering.length) result = await restoreImage(source, mask, params, hooks)
+  else {
+    const lineMask = buildMask(lettering, [], w, h, params)
+    // The lettering's own pixels belong to this pass only: the first pass must not repaint them (it would smear whatever lies under the letters).
+    const first = mask.some((v, i) => v && !lineMask[i]) ? await restoreImage(source, mask.map((v, i) => (lineMask[i] ? 0 : v)), params, hooks) : null
+    const base = first ? composeResult(source, first) : source
+    const second = await restoreImage(base, lineMask, { ...params, method: 'lama' }, { ...hooks, lama: true, clusterGap: Math.max(8, Math.round(Math.max(w, h) * 0.008)) })
+    // Final = the first pass everywhere it painted, the lettering pass where it painted (its fill already builds on the first).
+    const alpha = first ? Float32Array.from(first.alpha) : new Float32Array(w * h)
+    const filled = first ? new Uint8ClampedArray(first.filled) : new Uint8ClampedArray(source.data)
+    for (let i = 0; i < w * h; i++) {
+      if (second.alpha[i] <= 0) continue
+      alpha[i] = second.alpha[i]
+      filled.set(second.filled.subarray(i * 4, i * 4 + 4), i * 4)
+    }
+    result = { filled, alpha, methods: [...new Set([...(first?.methods ?? []), ...second.methods])], warnings: [...(first?.warnings ?? []), ...second.warnings], ms: (first?.ms ?? 0) + second.ms, maskPercent: first ? first.maskPercent : second.maskPercent }
+  }
   report.methods = result.methods
   report.warnings = [...report.warnings, ...result.warnings]
   report.ms = performance.now() - t0

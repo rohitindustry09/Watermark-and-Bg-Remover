@@ -21,11 +21,25 @@ function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => Error): Prom
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
 }
 
-let workerPromise: Promise<TessWorker> | null = null
+interface OcrSlot {
+  worker: Promise<TessWorker>
+  busy: boolean
+  dead: boolean
+}
+
+const slots: OcrSlot[] = []
+const waiters: (() => void)[] = []
+let poolSize = 1
+
+/** How many OCR workers may exist at once (1-5). Each reads one image at a time, so this is how many images are read together. */
+export function setOcrPoolSize(n: number): void {
+  poolSize = Math.min(5, Math.max(1, Math.round(n)))
+  for (const w of waiters.splice(0)) w() // let waiting images re-check for a free worker
+}
 
 /** OCR runs fully in the browser; the worker, WASM core and English data are served from this site (public/ocr). */
-function getWorker(): Promise<TessWorker> {
-  workerPromise ??= (async () => {
+function createOcrWorker(): Promise<TessWorker> {
+  return (async () => {
     const w = await createWorker('eng', 1, {
       workerPath: `${BASE}ocr/worker.min.js`,
       corePath: `${BASE}ocr/`,
@@ -36,10 +50,53 @@ function getWorker(): Promise<TessWorker> {
     await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT })
     return w
   })()
-  workerPromise.catch(() => {
-    workerPromise = null
-  })
-  return workerPromise
+}
+
+interface OcrLease {
+  worker: TessWorker
+  release(): void
+  /** The worker hung: drop it so the next image starts a fresh one. */
+  discard(): void
+}
+
+/** Takes a free worker, starting a new one while the pool has room, otherwise waits for one to be released. */
+async function acquireOcr(): Promise<OcrLease> {
+  for (;;) {
+    let slot = slots.find((s) => !s.busy && !s.dead)
+    if (!slot && slots.filter((s) => !s.dead).length < poolSize) {
+      slot = { worker: createOcrWorker(), busy: false, dead: false }
+      slots.push(slot)
+    }
+    if (slot) {
+      const mine = slot
+      mine.busy = true
+      let worker: TessWorker
+      try {
+        worker = await mine.worker
+      } catch (e) {
+        mine.dead = true
+        slots.splice(slots.indexOf(mine), 1)
+        for (const w of waiters.splice(0)) w()
+        throw e
+      }
+      return {
+        worker,
+        release() {
+          mine.busy = false
+          waiters.shift()?.()
+        },
+        discard() {
+          mine.dead = true
+          mine.busy = false
+          const i = slots.indexOf(mine)
+          if (i >= 0) slots.splice(i, 1)
+          void worker.terminate().catch(() => undefined)
+          waiters.shift()?.()
+        },
+      }
+    }
+    await new Promise<void>((resolve) => waiters.push(resolve))
+  }
 }
 
 interface TessBox {
@@ -97,7 +154,16 @@ export interface OcrOptions {
 
 /** Reads text lines from the image, optionally also scanning rotated versions to find slanted watermarks. */
 export async function recognizeLines(source: ImageData, opts: OcrOptions): Promise<OcrLine[]> {
-  const worker = await getWorker()
+  const lease = await acquireOcr()
+  try {
+    return await recognizeWith(lease, source, opts)
+  } finally {
+    lease.release()
+  }
+}
+
+async function recognizeWith(lease: OcrLease, source: ImageData, opts: OcrOptions): Promise<OcrLine[]> {
+  const worker = lease.worker
   const scale = Math.min(1, MAX_OCR_EDGE / Math.max(source.width, source.height))
   const full = new OffscreenCanvas(source.width, source.height)
   full.getContext('2d')!.putImageData(source, 0, 0)
@@ -113,8 +179,8 @@ export async function recognizeLines(source: ImageData, opts: OcrOptions): Promi
     const { canvas, w: rw, h: rh } = rotated(base, angle)
     const blob = await canvas.convertToBlob({ type: 'image/png' })
     const res = await withTimeout(worker.recognize(blob, {}, { blocks: true }), OCR_PASS_TIMEOUT_MS, () => {
-      // A hung OCR worker would block the whole batch: drop it so the next image starts a fresh one.
-      void disposeOcr()
+      // A hung OCR worker would block its image for good: drop it so the next image starts a fresh one.
+      lease.discard()
       return new Error('Text recognition did not finish in time and was stopped.')
     })
     const rad = (-angle * Math.PI) / 180 // rotate back
@@ -142,7 +208,9 @@ export async function recognizeLines(source: ImageData, opts: OcrOptions): Promi
 }
 
 export async function disposeOcr(): Promise<void> {
-  const p = workerPromise
-  workerPromise = null
-  if (p) await (await p).terminate().catch(() => undefined)
+  const all = slots.splice(0)
+  for (const slot of all) {
+    slot.dead = true
+    void (await slot.worker.catch(() => null))?.terminate().catch(() => undefined)
+  }
 }

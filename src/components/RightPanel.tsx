@@ -103,7 +103,7 @@ export function RightPanel() {
               <dd className="text-right">{item.timing?.model}</dd>
               <dt className="text-muted">Inference</dt>
               <dd className="text-right font-mono">
-                {item.timing ? `${(item.timing.ms / 1000).toFixed(1)}s ${item.timing.device}/${item.timing.precision}` : '—'}
+                {item.timing ? `${(item.timing.ms / 1000).toFixed(1)}s ${item.timing.device}/${item.timing.precision}${item.cached ? ' · saved result' : ''}` : '—'}
               </dd>
             </dl>
             <div>

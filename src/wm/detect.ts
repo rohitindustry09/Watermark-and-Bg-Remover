@@ -1,6 +1,7 @@
 import { classifyText, clampBox, downscaleGray, segmentOverlay, segmentVeil, toGray, type Box } from './overlay'
 import { detectWatermarkBoxes } from './detector'
 import { detectSatMarks, detectTintMarks } from './marks'
+import { detectChromaText } from './chroma'
 import { extractTextStrokes, strokeWidthFor } from './strokes'
 import { detectTextBoxes } from './textDetector'
 import { recognizeLines, type OcrLine } from './ocr'
@@ -228,7 +229,24 @@ export async function detectTextOverlays(source: ImageData, opts: { onDownload?:
 
 /** Coloured (tinted) watermark candidates in single-hue-family images. Pure pixel analysis, no model download. */
 export function detectTint(source: ImageData, focus?: Uint8Array): Region[] {
-  return [...detectTintMarks(source.data, source.width, source.height), ...detectSatMarks(source.data, source.width, source.height, focus)].map((t) => ({
+  const lines: Region[] = detectChromaText(source.data, source.width, source.height).map((t) => ({
+    id: uid(),
+    kind: 'tint' as const,
+    text: 'coloured text',
+    confidence: Math.round(t.score * 100),
+    category: 'watermark' as const,
+    reason: t.reason,
+    box: t.box,
+    mask: t.mask,
+    angle: 0,
+    tints: t.tints,
+    // The repaint margin follows the stroke width: a fixed margin turns thin strokes into slabs and repaints most of the band they sit in.
+    grow: Math.max(1, Math.min(4, Math.round(0.3 * t.stroke))),
+    selected: false,
+    needsAuth: false,
+    authorized: false,
+  }))
+  const others = [...detectTintMarks(source.data, source.width, source.height), ...detectSatMarks(source.data, source.width, source.height, focus)].map((t) => ({
     id: uid(),
     kind: 'tint' as const,
     text: t.via === 'sat' ? 'coloured logo' : 'coloured watermark',
@@ -242,4 +260,14 @@ export function detectTint(source: ImageData, focus?: Uint8Array): Region[] {
     needsAuth: false,
     authorized: false,
   }))
+  // The older hue-based marks often cover the same lettering less precisely (and spill onto the subject): the line detector's mask wins.
+  const overlapsLine = (b: Region['box']): boolean =>
+    lines.some((l) => {
+      const iw = Math.min(b[2], l.box[2]) - Math.max(b[0], l.box[0])
+      const ih = Math.min(b[3], l.box[3]) - Math.max(b[1], l.box[1])
+      // Share of the SMALLER box: a block of the subject that merely touches the lettering is covered by it too, and must not be repainted as a mark.
+      const smaller = Math.min((l.box[2] - l.box[0]) * (l.box[3] - l.box[1]), (b[2] - b[0]) * (b[3] - b[1]))
+      return iw > 0 && ih > 0 && (iw * ih) / smaller > 0.3
+    })
+  return [...lines, ...others.filter((o) => !overlapsLine(o.box))]
 }

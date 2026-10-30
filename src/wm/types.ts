@@ -21,6 +21,8 @@ export interface Region {
   grow?: number
   /** Share of the extracted pixels found by a colour cue (coloured lettering); near 0 for monochrome features such as carving. */
   colour?: number
+  /** Distinct tint colours in coloured lettering (set by the coloured-text detector). */
+  tints?: number
   /** Share of the box covered by the extracted mask (1 = the whole box, i.e. the strokes could not be separated). */
   coverage?: number
   selected: boolean

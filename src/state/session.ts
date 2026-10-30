@@ -29,7 +29,10 @@ export interface Session {
   w: number
   h: number
   source: ImageData
+  /** The picture the cutout is made from (after watermark removal, when that ran). */
   original: OffscreenCanvas
+  /** The upload exactly as it was added (or extracted from the ZIP), shown by the Original and Split views; never edited. */
+  pristine: OffscreenCanvas
   cutout: OffscreenCanvas
   client: RefineClient
   labels: Int32Array
@@ -46,11 +49,21 @@ export function canvasFrom(img: ImageData): OffscreenCanvas {
   return c
 }
 
-export async function createSession(id: string, file: File): Promise<Session> {
+export async function createSession(id: string, file: File, pristineFile?: File): Promise<Session> {
   const asset = rawAssets.get(id)
   if (!asset) throw new Error('No segmentation result for this image yet.')
   const { source } = await decodeFile(file, asset.workEdge)
   if (source.width !== asset.w || source.height !== asset.h) throw new Error('Image dimensions changed since processing; please reprocess.')
+  const original = canvasFrom(source)
+  let pristine = original
+  if (pristineFile && pristineFile !== file) {
+    try {
+      const p = (await decodeFile(pristineFile, asset.workEdge)).source
+      if (p.width === source.width && p.height === source.height) pristine = canvasFrom(p)
+    } catch {
+      // the untouched copy could not be decoded: the Original view falls back to the working picture
+    }
+  }
   const client = new RefineClient()
   try {
     const init = await client.init(source, dequantize(asset.raw))
@@ -59,7 +72,8 @@ export async function createSession(id: string, file: File): Promise<Session> {
       w: asset.w,
       h: asset.h,
       source,
-      original: canvasFrom(source),
+      original,
+      pristine,
       cutout: new OffscreenCanvas(asset.w, asset.h),
       client,
       labels: init.labels,

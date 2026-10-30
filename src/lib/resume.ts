@@ -12,8 +12,12 @@ export interface ResumeBackend {
   get(key: string): Promise<ResumeEntry | undefined>
   put(key: string, entry: ResumeEntry): Promise<void>
   delete(key: string): Promise<void>
-  /** Keys with their save time, for eviction. */
+  /** Keys with their save time, for eviction. Loads every entry, so only used when a size limit is set. */
   list(): Promise<{ key: string; at: number }[]>
+  /** Number of entries, without loading them. */
+  count(): Promise<number>
+  /** Every key, without loading the entries. */
+  keys(): Promise<string[]>
   clear(): Promise<void>
 }
 
@@ -24,6 +28,8 @@ export function memoryBackend(): ResumeBackend {
     put: async (k, e) => void m.set(k, e),
     delete: async (k) => void m.delete(k),
     list: async () => [...m].map(([key, e]) => ({ key, at: e.at })),
+    count: async () => m.size,
+    keys: async () => [...m.keys()],
     clear: async () => m.clear(),
   }
 }
@@ -59,6 +65,8 @@ export function idbBackend(): ResumeBackend | null {
       const vals = (await wrap(s.getAll())) as ResumeEntry[]
       return keys.map((key, i) => ({ key, at: vals[i]?.at ?? 0 }))
     },
+    count: async () => wrap((await store('readonly')).count()),
+    keys: async () => (await wrap((await store('readonly')).getAllKeys())) as string[],
     clear: async () => void (await wrap((await store('readwrite')).clear())),
   }
 }
@@ -83,9 +91,11 @@ export class ResumeStore {
   async put(stage: string, key: string, blob: Blob, meta?: string): Promise<void> {
     try {
       await this.backend.put(`${stage}:${key}`, { blob, at: Date.now(), meta })
-      const all = await this.backend.list()
-      if (all.length > this.maxEntries) {
-        for (const old of all.sort((a, b) => a.at - b.at).slice(0, all.length - this.maxEntries)) await this.backend.delete(old.key)
+      if (Number.isFinite(this.maxEntries)) {
+        const all = await this.backend.list()
+        if (all.length > this.maxEntries) {
+          for (const old of all.sort((a, b) => a.at - b.at).slice(0, all.length - this.maxEntries)) await this.backend.delete(old.key)
+        }
       }
     } catch {
       // Storage full or unavailable: the batch simply is not resumable for this item.
@@ -94,7 +104,17 @@ export class ResumeStore {
 
   async count(): Promise<number> {
     try {
-      return (await this.backend.list()).length
+      return await this.backend.count()
+    } catch {
+      return 0
+    }
+  }
+
+  /** Entries of one kind (e.g. 'seg' = one per finished image), counted from the keys only. */
+  async countStage(stage: string): Promise<number> {
+    try {
+      const prefix = `${stage}:`
+      return (await this.backend.keys()).filter((k) => k.startsWith(prefix)).length
     } catch {
       return 0
     }
@@ -132,4 +152,5 @@ export function settingsHash(o: unknown): string {
   return (h >>> 0).toString(36)
 }
 
-export const resume = new ResumeStore(idbBackend() ?? memoryBackend())
+/** The saved-results store (opt-in, see lib/cache.ts). No entry limit: it is emptied by the user, and counting never loads the entries. */
+export const resume = new ResumeStore(idbBackend() ?? memoryBackend(), Number.POSITIVE_INFINITY)

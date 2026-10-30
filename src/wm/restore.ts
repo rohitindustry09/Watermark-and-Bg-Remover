@@ -25,6 +25,8 @@ export interface RestoreHooks {
   unknown?: Uint8Array
   /** Allow LaMa in automatic mode. Defaults to a memory-based policy (see `lamaAllowedByDefault`); an explicitly chosen LaMa always runs. */
   lama?: boolean
+  /** Pieces closer than this (px) are repaired together; smaller keeps words apart so each fits LaMa's 512 px window at full resolution. */
+  clusterGap?: number
   /** Address of a local IOPaint server, used when the method is 'iopaint'. */
   iopaintUrl?: string
   onProgress?: (done: number, total: number, label: string) => void
@@ -54,7 +56,7 @@ export async function restoreImage(source: ImageData, mask: Uint8Array, requeste
   const methods = new Set<string>()
   // LaMa reconstructs a whole 512 px window per call, so nearby pieces (the letters of one word, the words of one line) are merged
   // into one crop; Telea works on tiny crops and keeps the tight grouping.
-  const clusters = clusterMask(mask, w, h, params.method === 'telea' ? Math.max(4, params.teleaRadius * 2) : Math.max(24, Math.round(Math.max(w, h) * 0.03)))
+  const clusters = clusterMask(mask, w, h, params.method === 'telea' ? Math.max(4, params.teleaRadius * 2) : hooks.clusterGap ?? Math.max(24, Math.round(Math.max(w, h) * 0.03)))
   const profile = WM_PROFILES[params.profile]
   const srcCanvas = canvasOf(source)
   const gray = toGray(source.data, w, h)

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as RPE } fr
 import { useStudio, getSession } from '../state/studio'
 import { rawAssets } from '../state/session'
 import { outToImage, renderComposite, type Placement } from '../lib/composite'
+import { gradeCanvas } from '../enhance/apply'
+import { useEnhance } from '../enhance/store'
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 32
@@ -21,6 +23,10 @@ interface Live {
 export function Workspace() {
   const s = useStudio()
   const { items, activeId, tick, bg, shadow, layout, compare, splitPos, showMask, showUncertain, previewColor, view, fitTick, tool, brushSize, selAction } = s
+  const saturation = useEnhance((e) => e.saturation)
+  const warmth = useEnhance((e) => e.warmth)
+  const contrast = useEnhance((e) => e.contrast)
+  const highlights = useEnhance((e) => e.highlights)
   const item = items.find((i) => i.id === activeId)
   const wrap = useRef<HTMLDivElement>(null)
   const main = useRef<HTMLCanvasElement>(null)
@@ -42,12 +48,12 @@ export function Workspace() {
       setDims(null)
       return
     }
-    const p = renderComposite({ target: m, cutout: sess.cutout, original: sess.original, bounds: sess.bounds, bg, shadow, layout })
+    const p = renderComposite({ target: m, cutout: gradeCanvas(sess.cutout, { saturation, warmth, contrast, highlights }), original: sess.original, bounds: sess.bounds, bg, shadow, layout })
     placement.current = p
     const o = orig.current!
     o.width = p.outW
     o.height = p.outH
-    o.getContext('2d')!.drawImage(sess.original, p.sx, p.sy, p.sw, p.sh, p.dx, p.dy, p.dw, p.dh)
+    o.getContext('2d')!.drawImage(sess.pristine, p.sx, p.sy, p.sw, p.sh, p.dx, p.dy, p.dw, p.dh)
     for (const c of [mask.current!, stroke.current!]) {
       c.width = p.outW
       c.height = p.outH
@@ -76,7 +82,7 @@ export function Workspace() {
       mctx.drawImage(tmp, p.sx, p.sy, p.sw, p.sh, p.dx, p.dy, p.dw, p.dh)
     }
     setDims((d) => (d && d.w === p.outW && d.h === p.outH ? d : { w: p.outW, h: p.outH }))
-  }, [tick, bg, shadow, layout, ready, activeId, showMask, showUncertain])
+  }, [tick, bg, shadow, layout, ready, activeId, showMask, showUncertain, saturation, warmth, contrast, highlights])
 
   // ---- fit to screen ------------------------------------------------------
   useEffect(() => {

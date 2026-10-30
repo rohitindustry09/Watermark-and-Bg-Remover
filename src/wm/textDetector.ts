@@ -1,5 +1,6 @@
 import { labelRegions } from '../lib/matte'
 import { inferClient, type InferSession } from '../lib/inferClient'
+import { openServerSession } from '../lib/serverClient'
 import { loadModelBytes, type ProgressFn } from '../lib/modelStore'
 import type { Box } from './overlay'
 
@@ -30,7 +31,7 @@ inferClient.onReset(() => {
 })
 
 export function loadTextDetector(onDownload?: ProgressFn, signal?: AbortSignal): Promise<InferSession> {
-  session ??= (async () => inferClient.create(await loadModelBytes(textDetectorUrl, onDownload, signal), 60_000, signal))()
+  session ??= (async () => (await openServerSession(textDetectorUrl, signal)) ?? inferClient.create(await loadModelBytes(textDetectorUrl, onDownload, signal), 60_000, signal))()
   session.catch(() => {
     session = null
   })

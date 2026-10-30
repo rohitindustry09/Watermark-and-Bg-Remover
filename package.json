@@ -6,6 +6,8 @@
   "scripts": {
     "postinstall": "node scripts/copy-ocr.mjs",
     "dev": "vite",
+    "server": "node server/index.mjs",
+    "app": "node scripts/start-all.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
@@ -14,6 +16,7 @@
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
     "fflate": "^0.8.3",
+    "onnxruntime-node": "^1.31.1",
     "onnxruntime-web": "^1.30.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

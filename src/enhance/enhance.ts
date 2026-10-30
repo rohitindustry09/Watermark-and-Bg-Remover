@@ -1,4 +1,4 @@
-import { autoTone, bleedBanded, denoiseBanded, unsharpBanded } from './classical'
+import { autoTone, bleedBanded, denoiseBanded, matchTone, unsharpBanded } from './classical'
 import { SR_MODEL, loadSr, srTile } from './sr'
 import { extractTile, planEnhance, planTiles, type EnhancePlan, type EnhanceTarget } from './tiles'
 
@@ -12,6 +12,8 @@ export interface EnhanceOptions {
   /** 0..1 */
   sharpen: number
   autoTone: boolean
+  /** Give the result the original's overall tone and colourfulness back (default on). Auto tone is skipped while this is on. */
+  keepColours?: boolean
   signal?: AbortSignal
   onProgress?: (done: number, total: number, label: string) => void
   onDownload?: (loaded: number, total: number) => void
@@ -103,10 +105,12 @@ async function enhanceCanvasUnsafe(source: AnyCanvas, opts: EnhanceOptions): Pro
   const alpha = new Uint8ClampedArray(w * h)
   for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3]
 
+  const keepColours = opts.keepColours !== false
+  const pristine = keepColours ? new Uint8ClampedArray(rgba) : null // the input as it was: the reference for the tone match
   opts.onProgress?.(0, 1, 'Preparing')
   if (hasAlpha) rgba = bleedBanded(rgba, w, h)
   if (opts.denoise > 0) rgba = denoiseBanded(rgba, w, h, opts.denoise)
-  if (opts.autoTone) rgba = autoTone(rgba, 0.8).data
+  if (opts.autoTone && !keepColours) rgba = autoTone(rgba, 0.8).data
 
   // Opaque RGB working copy for resampling.
   const rgb = new Uint8ClampedArray(rgba)
@@ -159,6 +163,12 @@ async function enhanceCanvasUnsafe(source: AnyCanvas, opts: EnhanceOptions): Pro
     const a = resize(toCanvas(grey, w, h), ow, oh)
     const ad = a.getContext('2d')!.getImageData(0, 0, ow, oh).data
     for (let i = 0; i < ow * oh; i++) out[i * 4 + 3] = ad[i * 4]
+  }
+  if (pristine) {
+    // The enhancer's global tone and saturation shifts are undone; its detail stays.
+    const ref = resize(toCanvas(pristine, w, h), ow, oh).getContext('2d')!.getImageData(0, 0, ow, oh).data
+    for (let i = 3; i < ref.length; i += 4) ref[i] = out[i]
+    out = matchTone(out, ref)
   }
   const result = toCanvas(out, ow, oh)
   return { canvas: result, plan, notes, ms: performance.now() - t0 }

@@ -1,8 +1,9 @@
 export const LIMITS = {
-  maxFileBytes: 60 * 1024 * 1024,
+  /** One image file. The pixel limit below is what really bounds memory; this only stops absurd files. */
+  maxFileBytes: 1024 * 1024 * 1024,
   maxPixels: 80_000_000,
-  maxZipEntries: 2000,
-  maxZipTotalBytes: 500 * 1024 * 1024,
+  /** Entries read from one ZIP. There is no limit on the ZIP's own or total size: images are read from it one at a time. */
+  maxZipEntries: 50_000,
 }
 
 export interface ImageInfo {

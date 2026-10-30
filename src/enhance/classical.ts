@@ -90,6 +90,141 @@ export function autoTone(rgba: Uint8ClampedArray, strength = 0.8): { data: Uint8
   return { data: out, info: { black, white } }
 }
 
+const lumOf = (r: number, g: number, b: number): number => 0.299 * r + 0.587 * g + 0.114 * b
+
+/**
+ * Gives `rgba` the overall tone and colourfulness of `ref` (the same picture before enhancement, resampled to the same size) while keeping every
+ * bit of its local detail. Upscalers and sharpeners push shadows down, highlights up and colours stronger; this puts the global brightness curve and
+ * the saturation back. Luminance is histogram-matched (a monotonic tone curve, so edges and texture survive), then the colour offset from grey is
+ * rescaled so the mean saturation equals the reference's. Only opaque pixels (alpha >= 200) are measured, so a transparent background does not skew
+ * it; with no alpha at all every pixel counts.
+ */
+export function matchTone(rgba: Uint8ClampedArray, ref: Uint8ClampedArray): Uint8ClampedArray {
+  const n = rgba.length / 4
+  const h1 = new Float64Array(256)
+  const h2 = new Float64Array(256)
+  let count = 0
+  let sRef = 0
+  for (let i = 0; i < n; i++) {
+    if (rgba[i * 4 + 3] < 200) continue
+    const y1 = lumOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2])
+    const y2 = lumOf(ref[i * 4], ref[i * 4 + 1], ref[i * 4 + 2])
+    h1[Math.round(y1)]++
+    h2[Math.round(y2)]++
+    const mx = Math.max(ref[i * 4], ref[i * 4 + 1], ref[i * 4 + 2])
+    sRef += mx > 0 ? (mx - Math.min(ref[i * 4], ref[i * 4 + 1], ref[i * 4 + 2])) / mx : 0
+    count++
+  }
+  if (count < 100) return rgba
+  // Histogram matching: send each luminance to the reference luminance at the same rank.
+  const cdf = (h: Float64Array): Float64Array => {
+    const c = new Float64Array(256)
+    let acc = 0
+    for (let v = 0; v < 256; v++) c[v] = acc += h[v] / count
+    return c
+  }
+  const f1 = cdf(h1)
+  const f2 = cdf(h2)
+  const lut = new Float32Array(256)
+  let j = 0
+  for (let v = 0; v < 256; v++) {
+    while (j < 255 && f2[j] < f1[v]) j++
+    lut[v] = j
+  }
+  // Saturation after the tone curve (the curve changes how colourful dark and bright pixels look), measured the way the eye reads it, then rescaled to
+  // the reference's mean; clamped so a flat reference cannot blow colours up.
+  const clamp = (v: number): number => Math.min(255, Math.max(0, v))
+  let sOut = 0
+  for (let i = 0; i < n; i++) {
+    if (rgba[i * 4 + 3] < 200) continue
+    const y = lumOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2])
+    const ny = lut[Math.min(255, Math.round(y))]
+    const r = clamp(ny + (rgba[i * 4] - y))
+    const g = clamp(ny + (rgba[i * 4 + 1] - y))
+    const b = clamp(ny + (rgba[i * 4 + 2] - y))
+    const mx = Math.max(r, g, b)
+    sOut += mx > 0 ? (mx - Math.min(r, g, b)) / mx : 0
+  }
+  const sat = Math.min(1.6, Math.max(0.5, sOut > 0 ? sRef / sOut : 1))
+  const out = new Uint8ClampedArray(rgba)
+  for (let i = 0; i < n; i++) {
+    const r = rgba[i * 4]
+    const g = rgba[i * 4 + 1]
+    const b = rgba[i * 4 + 2]
+    const y = lumOf(r, g, b)
+    const ny = lut[Math.min(255, Math.round(y))]
+    out[i * 4] = ny + (r - y) * sat
+    out[i * 4 + 1] = ny + (g - y) * sat
+    out[i * 4 + 2] = ny + (b - y) * sat
+  }
+  return out
+}
+
+export interface Grade {
+  /** Scales the colour offset from grey. 1 = unchanged. */
+  saturation: number
+  /** 0..1: pulls the colours toward gold (a little more red, a lot less blue), keeping brightness. 0 = off. */
+  warmth: number
+  /** S-curve on brightness: above 1 darkens shadows and brightens lights, below 1 flattens. 1 = unchanged. Pure black and white stay put. */
+  contrast: number
+  /** 0..1: lifts the bright tones only (the glint on polished metal) without touching shadows. 0 = off. */
+  highlights: number
+}
+
+export const NO_GRADE: Grade = { saturation: 1, warmth: 0, contrast: 1, highlights: 0 }
+
+export const gradeIsOff = (g: Grade): boolean => Math.abs(g.saturation - 1) < 1e-3 && g.warmth <= 0 && Math.abs(g.contrast - 1) < 1e-3 && g.highlights <= 0
+
+/** Brightness curve on 0..1: contrast as a smooth S that leaves 0, 0.5 and 1 fixed, then a highlight lift that fades to nothing at both ends. */
+function toneCurve(t: number, contrast: number, highlights: number): number {
+  let v = t + (contrast - 1) * (t - 0.5) * 4 * t * (1 - t)
+  v += 0.9 * highlights * v * v * v * (1 - v) // cubic: almost nothing in the shadows, most in the upper-mid and bright tones
+  return Math.min(1, Math.max(0, v))
+}
+
+/**
+ * Optional grade for visible pixels. Warmth, then the brightness curve (contrast / highlights, applied to luminance only so colours keep their
+ * balance), then saturation. Fully transparent pixels are left alone. With everything at its neutral value the input is returned as is.
+ */
+export function colourGrade(rgba: Uint8ClampedArray, g: Grade): Uint8ClampedArray {
+  if (gradeIsOff(g)) return rgba
+  const out = new Uint8ClampedArray(rgba)
+  const n = rgba.length / 4
+  const w = Math.min(1, Math.max(0, g.warmth))
+  const curve = Math.abs(g.contrast - 1) >= 1e-3 || g.highlights > 0
+  const lut = new Float32Array(256)
+  if (curve) for (let v = 0; v < 256; v++) lut[v] = toneCurve(v / 255, g.contrast, g.highlights) * 255
+  for (let i = 0; i < n; i++) {
+    if (rgba[i * 4 + 3] === 0) continue
+    let r = rgba[i * 4]
+    let gg = rgba[i * 4 + 1]
+    let b = rgba[i * 4 + 2]
+    if (w > 0) {
+      const y0 = lumOf(r, gg, b)
+      r *= 1 + 0.1 * w
+      gg *= 1 - 0.01 * w
+      b *= 1 - 0.26 * w
+      const y1 = lumOf(r, gg, b)
+      const k = y1 > 0 ? y0 / y1 : 1
+      r *= k
+      gg *= k
+      b *= k
+    }
+    let y = lumOf(r, gg, b)
+    if (curve) {
+      const ny = lut[Math.min(255, Math.max(0, Math.round(y)))]
+      r += ny - y
+      gg += ny - y
+      b += ny - y
+      y = ny
+    }
+    out[i * 4] = y + (r - y) * g.saturation
+    out[i * 4 + 1] = y + (gg - y) * g.saturation
+    out[i * 4 + 2] = y + (b - y) * g.saturation
+  }
+  return out
+}
+
 /**
  * Replaces the colour of (nearly) transparent pixels with the colour of nearby opaque pixels, so resampling and sharpening an
  * image with an alpha channel cannot pull the old background colour into the soft edge as a halo.

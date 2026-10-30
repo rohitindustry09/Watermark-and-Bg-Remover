@@ -4,8 +4,10 @@ import { InferError, inferClient, type InferSession } from './inferClient'
 import { MODELS, modelUrl, type ModelId, type ModelSpec, type Precision } from './models'
 import { loadModelBytes, type ProgressFn } from './modelStore'
 import { modelInputSize, toTensorData } from './preprocess'
+import { createServerSession, serverStatus } from './serverClient'
 
-export type Device = 'webgpu' | 'wasm'
+/** `server`: the local inference server (server/index.mjs) runs the model on this PC; `webgpu`/`wasm`: in-browser engines. */
+export type Device = 'webgpu' | 'wasm' | 'server'
 
 export interface DeviceInfo {
   device: Device
@@ -16,45 +18,20 @@ export interface DeviceInfo {
 
 let deviceInfo: Promise<DeviceInfo> | null = null
 
-const GPU_FLAG = 'cutout-studio:gpu-disabled'
-const GPU_FLAG_DAYS = 14
-
-/** A GPU that failed once (a hung driver costs a 60 s wait) stays off for a while, so later sessions do not wait again. `?device=gpu` clears it. */
-function gpuDisabledEarlier(): string | null {
-  try {
-    if (new URLSearchParams(globalThis.location?.search ?? '').get('device') === 'gpu') {
-      localStorage.removeItem(GPU_FLAG)
-      return null
-    }
-    const raw = localStorage.getItem(GPU_FLAG)
-    if (!raw) return null
-    const f = JSON.parse(raw) as { at: number; reason: string }
-    if (Date.now() - f.at > GPU_FLAG_DAYS * 86_400_000) {
-      localStorage.removeItem(GPU_FLAG)
-      return null
-    }
-    return f.reason
-  } catch {
-    return null
-  }
-}
-
-function rememberGpuFailure(reason: string): void {
-  try {
-    localStorage.setItem(GPU_FLAG, JSON.stringify({ at: Date.now(), reason: reason.slice(0, 80) }))
-  } catch {
-    // storage unavailable: the GPU is only skipped for this session
-  }
-}
+/** A GPU that failed this session stays off until the page is reloaded; nothing about it is stored. */
+let gpuFailure: string | null = null
 
 export function detectDevice(): Promise<DeviceInfo> {
   deviceInfo ??= (async (): Promise<DeviceInfo> => {
     const threads = wasmThreads()
     const params = new URLSearchParams(globalThis.location?.search ?? '')
+    const server = await serverStatus()
+    if (server) {
+      return { device: 'server', fp16: server.gpu !== null, threads, note: `Local inference server on this PC (${server.gpu ? `GPU: ${server.gpu}, CPU where a model cannot run on it` : 'CPU'})` }
+    }
     const forced = params.get('device') // ?device=cpu forces the CPU backend; ?device=gpu retries a GPU that failed earlier; ?fp16=0 forces fp32 weights on the GPU
-    const earlier = gpuDisabledEarlier()
-    if (earlier && forced !== 'gpu') {
-      return { device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU skipped after an earlier failure (open with ?device=gpu to retry)` }
+    if (gpuFailure) {
+      return { device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU skipped after a failure (reload the page to retry)` }
     }
     try {
       const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<{ features: Set<string> } | null> } }).gpu
@@ -72,7 +49,7 @@ export function detectDevice(): Promise<DeviceInfo> {
 
 /** Called when the GPU path fails at run time: all later work (including a retry) uses the CPU backend. */
 export function disableGpu(reason: string): void {
-  rememberGpuFailure(reason)
+  gpuFailure = reason
   const threads = wasmThreads()
   deviceInfo = Promise.resolve({ device: 'wasm', fp16: false, threads, note: `CPU (WebAssembly, ${threads} thread${threads > 1 ? 's' : ''}) — GPU unavailable: ${reason.slice(0, 60)}` })
   for (const p of sessions.values()) void p.then((m) => m.session.release()).catch(() => undefined)
@@ -98,7 +75,7 @@ inferClient.onReset(() => {
 export type EngineErrorCode = 'model-unavailable' | 'gpu-init' | 'out-of-memory' | 'inference' | 'timeout' | 'cancelled'
 
 /** Hard limits so a hung GPU driver or runaway CPU run cannot freeze a batch forever. */
-export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 30_000, wasm: 300_000 }
+export const INFERENCE_TIMEOUT_MS: Record<Device, number> = { webgpu: 30_000, wasm: 300_000, server: 300_000 }
 
 export class EngineError extends Error {
   constructor(
@@ -124,7 +101,7 @@ async function createGpuSession(bytes: Uint8Array, device: Device): Promise<ort.
 }
 
 function looksLikeOom(e: unknown): boolean {
-  return /out of memory|allocation|memory access|RangeError/i.test(String((e as Error)?.message ?? e))
+  return /out of memory|allocation|bad_alloc|memory access|RangeError/i.test(String((e as Error)?.message ?? e))
 }
 
 function build(spec: ModelSpec, session: ort.InferenceSession | InferSession, device: Device, precision: Precision): LoadedModel {
@@ -134,15 +111,28 @@ function build(spec: ModelSpec, session: ort.InferenceSession | InferSession, de
 export async function loadModel(id: ModelId, onDownload?: ProgressFn, signal?: AbortSignal): Promise<LoadedModel> {
   const dev = await detectDevice()
   const spec = MODELS[id]
-  if (spec.gpuOnly && dev.device !== 'webgpu') {
+  if (spec.gpuOnly && dev.device === 'wasm') {
     throw new EngineError(`${spec.name} needs WebGPU, which is not available. Choose another model.`, 'model-unavailable')
   }
   const cpuPrecision: Precision = spec.files.int8 ? 'int8' : 'fp32'
-  const precision: Precision = dev.device === 'webgpu' ? (dev.fp16 && spec.files.fp16 ? 'fp16' : 'fp32') : cpuPrecision
+  const precision: Precision = dev.device === 'server' ? (dev.fp16 && spec.files.fp16 ? 'fp16' : 'fp32') : dev.device === 'webgpu' ? (dev.fp16 && spec.files.fp16 ? 'fp16' : 'fp32') : cpuPrecision
   const key = `${id}:${dev.device}:${precision}`
   let p = sessions.get(key)
   if (!p) {
     p = (async () => {
+      if (dev.device === 'server') {
+        // The server downloads and loads the weights itself; fp16 is tried first on a GPU server, and fp32 if that file cannot run there.
+        let err: unknown
+        for (const prec of precision === 'fp16' ? (['fp16', 'fp32'] as Precision[]) : [precision]) {
+          try {
+            return build(spec, await createServerSession(modelUrl(spec, prec), signal), 'server', prec)
+          } catch (e) {
+            err = e
+            if (signal?.aborted) throw new EngineError('Cancelled', 'cancelled')
+          }
+        }
+        throw new EngineError(`The inference server could not load the model: ${(err as Error)?.message ?? err}`, 'model-unavailable')
+      }
       const bytes = await loadModelBytes(modelUrl(spec, precision), onDownload, signal)
       const attempts: Device[] = dev.device === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']
       let lastErr: unknown
@@ -207,8 +197,8 @@ export async function segment(model: LoadedModel, image: ImageData, signal?: Abo
   let raw: Float32Array
   let dims: readonly number[]
   try {
-    if (model.device === 'wasm') {
-      const out = (await (model.session as InferSession).run({ [model.inputName]: { data, dims: [1, 3, size.h, size.w] } }, INFERENCE_TIMEOUT_MS.wasm, signal))[model.outputName]
+    if (model.device === 'wasm' || model.device === 'server') {
+      const out = (await (model.session as InferSession).run({ [model.inputName]: { data, dims: [1, 3, size.h, size.w] } }, INFERENCE_TIMEOUT_MS[model.device], signal))[model.outputName]
       raw = out.data
       dims = out.dims
     } else {
@@ -229,7 +219,7 @@ export async function segment(model: LoadedModel, image: ImageData, signal?: Abo
   } catch (e) {
     if (e instanceof EngineError) throw e
     if (e instanceof InferError) {
-      if (e.code === 'timeout') throw new EngineError(`Processing timed out after ${INFERENCE_TIMEOUT_MS.wasm / 1000}s on the CPU, so it was stopped.`, 'timeout')
+      if (e.code === 'timeout') throw new EngineError(`Processing timed out after ${INFERENCE_TIMEOUT_MS[model.device === 'server' ? 'server' : 'wasm'] / 1000}s, so it was stopped.`, 'timeout')
       if (signal?.aborted) throw new EngineError('Cancelled', 'cancelled')
     }
     if (looksLikeOom(e)) {

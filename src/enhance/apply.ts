@@ -1,3 +1,4 @@
+import { colourGrade, gradeIsOff, type Grade } from './classical'
 import { enhanceCanvas, type EnhanceOptions } from './enhance'
 import type { WorkerOptions } from './enhance.worker'
 import { useEnhance } from './store'
@@ -110,9 +111,34 @@ function runInWorker(src: OffscreenCanvas, opts: WorkerOptions): Promise<Result>
  * never replaces the export: the unenhanced canvas is returned and the reason is reported through the enhance store.
  */
 export async function applyEnhance(canvas: OffscreenCanvas): Promise<OffscreenCanvas> {
+  return enhanceStep(canvas)
+}
+
+/** The grade currently chosen in the Colour panel. */
+export const currentGrade = (): Grade => {
+  const { saturation, warmth, contrast, highlights } = useEnhance.getState()
+  return { saturation, warmth, contrast, highlights }
+}
+
+/**
+ * The optional colour grade (saturation, golden warmth, contrast, highlights). It belongs on the subject BEFORE it is placed on a background (so a white or coloured background
+ * is not tinted); the Overlays tool, which exports the whole picture, grades the finished picture instead. Returns the canvas itself when the
+ * grade is off.
+ */
+export function gradeCanvas(canvas: OffscreenCanvas, grade: Grade): OffscreenCanvas {
+  if (gradeIsOff(grade)) return canvas
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const graded = colourGrade(img.data, grade)
+  const out = new OffscreenCanvas(canvas.width, canvas.height)
+  out.getContext('2d')!.putImageData(new ImageData(graded as Uint8ClampedArray<ArrayBuffer>, canvas.width, canvas.height), 0, 0)
+  return out
+}
+
+async function enhanceStep(canvas: OffscreenCanvas): Promise<OffscreenCanvas> {
   const s = useEnhance.getState()
   if (!s.enabled) return canvas
-  const opts: WorkerOptions = { target: s.target, ai: s.ai, aiBlend: s.aiBlend, denoise: s.denoise, sharpen: s.sharpen, autoTone: s.autoTone }
+  const opts: WorkerOptions = { target: s.target, ai: s.ai, aiBlend: s.aiBlend, denoise: s.denoise, sharpen: s.sharpen, autoTone: s.autoTone, keepColours: s.keepColours }
   try {
     const before = canvasStats(canvas)
     let result: Result

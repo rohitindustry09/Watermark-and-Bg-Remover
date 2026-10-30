@@ -104,6 +104,21 @@ describe('buildCutout (alpha + decontamination)', () => {
     expect(clean.data[edge + 1]).toBeLessThan(raw.data[edge + 1]) // less green/white bleed
     expect(clean.data[edge + 3]).toBe(raw.data[edge + 3]) // alpha untouched
   })
+  it('leaves no pale halo: a mostly-backdrop edge pixel takes the subject colour at the default strength', () => {
+    // Dark subject, pale backdrop; an edge pixel the model gave opacity 0.8 still carries mostly backdrop colour.
+    const w = 60
+    const src = image(w, 8, (x) => (x < 24 ? [90, 80, 40] : x < 30 ? [210, 205, 195] : [235, 235, 235]))
+    const alpha = new Float32Array(w * 8)
+    for (let y = 0; y < 8; y++) for (let x = 0; x < w; x++) alpha[y * w + x] = x < 24 ? 1 : x < 30 ? 0.8 : 0
+    const out = buildCutout(src, alpha, 0.7)
+    const lum = (x: number): number => 0.299 * out.data[x * 4] + 0.587 * out.data[x * 4 + 1] + 0.114 * out.data[x * 4 + 2]
+    const subject = lum(5)
+    const backdrop = 0.299 * 235 + 0.587 * 235 + 0.114 * 235
+    const edge = lum(26)
+    // Closer to the subject than to the backdrop, and in the nearer third of the way.
+    expect(edge - subject).toBeLessThan((backdrop - subject) * 0.34)
+    expect(out.data[26 * 4 + 3]).toBe(Math.round(0.8 * 255)) // the shape is untouched
+  })
   it('computes luminance in 0..1', () => {
     const img = new ImageData(2, 1)
     img.data.set([255, 255, 255, 255, 0, 0, 0, 255])
@@ -145,11 +160,20 @@ describe('zip safety', () => {
     expect(files.map((f) => f.name).sort()).toEqual(['a.png', 'b.jpg'])
     expect(files.find((f) => f.name === 'b.jpg') && dirOf(files.find((f) => f.name === 'b.jpg')!)).toBe('folder')
   })
-  it('refuses archives without images and archives over the entry cap', async () => {
+  it('refuses archives without images, and reads only up to the entry cap while saying so', async () => {
     await expect(extractImages(new File([zipSync({ 'a.txt': new Uint8Array([1]) }) as BlobPart], 'x.zip'))).rejects.toBeInstanceOf(ZipError)
     const many: Record<string, Uint8Array> = {}
-    for (let i = 0; i <= LIMITS.maxZipEntries; i++) many[`i${i}.png`] = new Uint8Array([1])
-    await expect(extractImages(new File([zipSync(many) as BlobPart], 'many.zip'))).rejects.toThrow(/more than/)
+    for (let i = 0; i < 8; i++) many[`i${i}.png`] = new Uint8Array([1, 2, 3])
+    const saved = LIMITS.maxZipEntries
+    LIMITS.maxZipEntries = 5
+    try {
+      const notes: string[] = []
+      const files = await extractImages(new File([zipSync(many) as BlobPart], 'many.zip'), notes)
+      expect(files).toHaveLength(5)
+      expect(notes.join(' ')).toMatch(/more than 5 images/)
+    } finally {
+      LIMITS.maxZipEntries = saved
+    }
   })
   it('neutralises spreadsheet formulas in the CSV report', () => {
     const csv = csvReport([{ name: '=HYPERLINK("x")', note: 'a,b' }])
