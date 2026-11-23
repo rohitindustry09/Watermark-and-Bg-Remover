@@ -20,14 +20,35 @@ describe('server cutout pipeline', () => {
     expect(Array.from(cutout.outputToAlpha(Float32Array.from([-1, 0.5, 2]), 3, 'matte'))).toEqual([0, 128, 255])
   })
 
-  it('returns a source-sized PNG whose alpha is the model matte', async () => {
-    const src = await sharp({ create: { width: 64, height: 48, channels: 3, background: { r: 10, g: 20, b: 30 } } }).jpeg().toBuffer()
-    // Fake model: left half of the 1024x1024 output is foreground, right half background.
-    const infer = async () => {
-      const data = new Float32Array(1024 * 1024)
-      for (let y = 0; y < 1024; y++) for (let x = 0; x < 1024; x++) data[y * 1024 + x] = x < 512 ? 20 : -20
-      return { data, dims: [1, 1, 1024, 1024] }
+  // Fake model: left half of the 1024x1024 output is foreground, right half background.
+  const infer = async () => {
+    const data = new Float32Array(1024 * 1024)
+    for (let y = 0; y < 1024; y++) for (let x = 0; x < 1024; x++) data[y * 1024 + x] = x < 512 ? 20 : -20
+    return { data, dims: [1, 1, 1024, 1024] }
+  }
+  const makeSource = () => sharp({ create: { width: 64, height: 48, channels: 3, background: { r: 10, g: 20, b: 30 } } }).jpeg().toBuffer()
+
+  it.each([
+    ['png', 'png', true],
+    ['webp', 'webp', true],
+    ['jpeg', 'jpeg', false],
+  ])('encodes %s output with the right container and transparency', async (format, expected, hasAlpha) => {
+    const out = await cutout.cutoutImage(await makeSource(), cutout.MODEL_SPECS['birefnet-lite'], infer, { format })
+    const meta = await sharp(out).metadata()
+    expect([meta.format, meta.width, meta.height, meta.hasAlpha]).toEqual([expected, 64, 48, hasAlpha])
+    if (hasAlpha) {
+      const { data } = await sharp(out).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+      expect(data[(24 * 64 + 4) * 4 + 3]).toBeGreaterThan(250) // foreground stays opaque
+      expect(data[(24 * 64 + 60) * 4 + 3]).toBeLessThan(5) // background is transparent
     }
+  })
+
+  it('rejects an unknown format', async () => {
+    await expect(cutout.cutoutImage(await makeSource(), cutout.MODEL_SPECS['birefnet-lite'], infer, { format: 'bmp' })).rejects.toThrow(/Unknown format/)
+  })
+
+  it('returns a source-sized PNG whose alpha is the model matte', async () => {
+    const src = await makeSource()
     const png = await cutout.cutoutImage(src, cutout.MODEL_SPECS['birefnet-lite'], infer)
     const { data, info } = await sharp(png).raw().toBuffer({ resolveWithObject: true })
     expect([info.width, info.height, info.channels]).toEqual([64, 48, 4])

@@ -27,6 +27,21 @@ npm run app        # inference server on 127.0.0.1:8787 + the web page on 127.0.
 - **Environment:** `INFERENCE_PORT` (default 8787), `MODEL_DIR`, `MODEL_HOST`, `ORT_PROVIDERS`; `VITE_INFERENCE_URL` points the page at another address.
 - Not yet moved to the server: AI upscaling (Enhance) and OCR still run in the browser.
 
+## Bulk background removal from the command line (no browser)
+
+For thousands of images, run the whole pipeline on the machine with the GPU instead of through a browser tab. Start the inference server
+(`npm run server`, or `npm run app`), then in a second terminal:
+
+```bash
+npm run batch -- <inputDir> <outputDir> [--model birefnet-lite|rmbg-1.4|modnet] [--format png|webp|avif|jpeg] [--quality 90] [--zip out.zip] [--jobs 6]
+```
+
+- Folders are searched recursively and the sub-folder layout is kept; re-running skips files that already exist, so an interrupted run resumes.
+- `--format webp` is typically several times smaller than PNG and keeps transparency; `jpeg` has no transparency and is flattened onto white.
+- `--zip` packs the output folder into one archive when the run ends (`zip` on Linux/macOS, the built-in `tar` on Windows; ZIP64, so over 4 GB works).
+- The result is the raw model matte at the source resolution; the browser editor's edge refinement is not applied.
+- `--jobs` is how many images are in flight; use 2-3 on a PC with little RAM.
+
 ## Installation
 
 Requirements: [Node.js](https://nodejs.org) 22.12 or newer (24 recommended), npm, and a current Chrome/Edge (WebGPU) — Firefox/Safari work on the slower CPU path.

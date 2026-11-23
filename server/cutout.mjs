@@ -60,10 +60,10 @@ export function outputToAlpha(raw, count, kind) {
 }
 
 /**
- * Cut the background out of one encoded image and return a PNG with the matte as its alpha channel, at the source resolution.
- * `infer(floatData, dims)` runs the model and resolves to { data: Float32Array, dims: number[] } for its last output.
+ * Cut the background out of one encoded image and return it encoded as `format` (default PNG) with the matte as its alpha channel, at the
+ * source resolution. `infer(floatData, dims)` runs the model and resolves to { data: Float32Array, dims: number[] } for its last output.
  */
-export async function cutoutImage(input, spec, infer) {
+export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90 } = {}) {
   const { data: rgba, info } = await sharp(input, { failOn: 'none' }).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height } = info
   const size = modelInputSize(spec, width, height)
@@ -89,5 +89,29 @@ export async function cutoutImage(input, spec, infer) {
   // `rgba` is this call's own decode buffer, so the matte can be written straight into its alpha bytes (the source's own alpha is replaced).
   // sharp's joinChannel is avoided here: a removeAlpha() before it strips the joined channel again and the PNG comes out opaque.
   for (let i = 0, n = width * height; i < n; i++) rgba[i * 4 + 3] = alpha[i]
-  return sharp(rgba, { raw: { width, height, channels: 4 } }).png({ compressionLevel: 3 }).toBuffer()
+  return encodeCutout(rgba, width, height, format, quality)
+}
+
+/** Output formats. `alpha: false` formats (jpeg) are flattened onto white, so the cutout shows no transparency. */
+export const FORMATS = {
+  png: { ext: 'png', alpha: true },
+  webp: { ext: 'webp', alpha: true },
+  avif: { ext: 'avif', alpha: true },
+  jpeg: { ext: 'jpg', alpha: false },
+}
+
+function encodeCutout(rgba, width, height, format, quality) {
+  const img = sharp(rgba, { raw: { width, height, channels: 4 } })
+  switch (format) {
+    case 'png':
+      return img.png({ compressionLevel: 3 }).toBuffer()
+    case 'webp':
+      return img.webp({ quality, alphaQuality: 100, effort: 3 }).toBuffer()
+    case 'avif':
+      return img.avif({ quality, effort: 2 }).toBuffer()
+    case 'jpeg':
+      return img.flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: false }).toBuffer()
+    default:
+      throw new Error(`Unknown format "${format}" (use ${Object.keys(FORMATS).join(', ')})`)
+  }
 }
