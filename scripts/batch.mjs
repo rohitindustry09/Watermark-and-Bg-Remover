@@ -7,6 +7,8 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
+import { findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
+import { closeWatermarkPool } from '../server/wm-pool.mjs'
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif|tiff?|bmp|gif)$/i
 
@@ -15,7 +17,8 @@ function parseArgs(argv) {
   const opts = { model: 'birefnet-lite', jobs: 6, precision: 'fp16', format: 'png', quality: 90, server: process.env.INFERENCE_URL ?? 'http://127.0.0.1:8787' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
+    if (a === '--remove-watermarks') opts['remove-watermarks'] = true
+    else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
     else positional.push(a)
   }
   opts.jobs = Math.max(1, Number(opts.jobs) || 6)
@@ -61,18 +64,36 @@ async function openSession(server, spec, precision) {
   throw lastErr
 }
 
-function makeInfer(server, spec, state) {
-  const run = async (body) => fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
-  return async (data, dims) => {
-    const body = encodeTensors([{ name: state.inputName, dims, data }])
-    let r = await run(body)
+/** Runs the model of `state` on named input tensors ([{ name, dims, data }]) and resolves to its output tensors. */
+function makeRun(server, spec, state) {
+  const post = async (body) => fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+  return async (feeds) => {
+    const body = encodeTensors(feeds)
+    let r = await post(body)
     if (r.status === 410) {
       Object.assign(state, await openSession(server, spec, state.precision)) // the server restarted since the model was loaded
-      r = await run(body)
+      r = await post(body)
     }
     if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error ?? `server returned ${r.status}`))
-    const outputs = decodeTensors(Buffer.from(await r.arrayBuffer()))
-    return outputs[outputs.length - 1]
+    return decodeTensors(Buffer.from(await r.arrayBuffer()))
+  }
+}
+
+/** LaMa as `(imageCHW, mask) => filledCHW` floats in 0..1 (the Carve export returns 0..255, which is detected and scaled). */
+function makeLama(run, session) {
+  const n = LAMA_SIZE
+  const imgName = session.inputNames.find((k) => !/mask/i.test(k)) ?? session.inputNames[0]
+  const maskName = session.inputNames.find((k) => /mask/i.test(k)) ?? session.inputNames[1]
+  return async (image, mask) => {
+    const out = await run([
+      { name: imgName, dims: [1, 3, n, n], data: image },
+      { name: maskName, dims: [1, 1, n, n], data: mask },
+    ])
+    const data = out[0].data
+    let max = 0
+    for (let i = 0; i < data.length; i += 97) if (data[i] > max) max = data[i]
+    const scale = max > 2 ? 1 / 255 : 1
+    return Float32Array.from(data, (v) => Math.min(1, Math.max(0, v * scale)))
   }
 }
 
@@ -103,7 +124,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--remove-watermarks] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -134,7 +155,32 @@ async function main() {
   const session = await openSession(opts.server, spec, opts.precision)
   const state = { sid: session.sid, inputName: session.inputNames[0], precision: session.precision }
   console.log(`Model ready on ${session.provider} (${session.precision}).`)
-  const infer = makeInfer(opts.server, spec, state)
+  const run = makeRun(opts.server, spec, state)
+  const infer = async (data, dims) => (await run([{ name: state.inputName, dims, data }])).at(-1)
+
+  // Watermark removal: LaMa fills what the colour detector marks, before the background is removed.
+  let removeWatermarks
+  let lamaState
+  const wmStats = { withMark: 0, checked: 0 }
+  if (opts['remove-watermarks']) {
+    const lamaSpec = { url: () => LAMA_URL }
+    const lamaSession = await openSession(opts.server, lamaSpec, 'fp32')
+    lamaState = { sid: lamaSession.sid, precision: 'fp32' }
+    console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}.`)
+    const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession)
+    removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
+      const found = await findWatermark(rgba, width, height)
+      wmStats.checked++
+      if (found.marks === 0) return
+      wmStats.withMark++
+      if (opts['debug-masks']) {
+        const debug = path.join(opts['debug-masks'], `${relPath}.png`)
+        fs.mkdirSync(path.dirname(debug), { recursive: true })
+        fs.writeFileSync(debug, await maskOverlay(rgba, width, height, found.mask)) // drawn before the fill, so the mask can be checked by eye
+      }
+      await inpaintMasked(rgba, width, height, found.mask, found.boxes, lama)
+    }
+  }
 
   const failures = []
   let done = 0
@@ -150,7 +196,8 @@ async function main() {
     while (next < todo.length) {
       const { src, dest } = todo[next++]
       try {
-        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality })
+        const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
+        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment })
         fs.mkdirSync(path.dirname(dest), { recursive: true })
         fs.writeFileSync(`${dest}.part`, png)
         fs.renameSync(`${dest}.part`, dest) // never leaves a half-written file that a re-run would skip
@@ -169,7 +216,9 @@ async function main() {
     if (failures.length > 20) console.log(`  ... and ${failures.length - 20} more`)
     process.exitCode = 1
   }
-  await fetch(`${opts.server}/api/release?sid=${state.sid}`, { method: 'POST' }).catch(() => undefined)
+  if (removeWatermarks) await closeWatermarkPool()
+  if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected).`)
+  for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)
   if (opts.zip) zipFolder(outputDir, opts.zip)
 }
 

@@ -63,9 +63,11 @@ export function outputToAlpha(raw, count, kind) {
  * Cut the background out of one encoded image and return it encoded as `format` (default PNG) with the matte as its alpha channel, at the
  * source resolution. `infer(floatData, dims)` runs the model and resolves to { data: Float32Array, dims: number[] } for its last output.
  */
-export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90 } = {}) {
+export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90, beforeSegment } = {}) {
   const { data: rgba, info } = await sharp(input, { failOn: 'none' }).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height } = info
+  // Optional clean-up of the decoded pixels (e.g. watermark removal) so the model segments, and the output keeps, the cleaned image.
+  if (beforeSegment) await beforeSegment({ rgba, width, height })
   const size = modelInputSize(spec, width, height)
 
   const small = await sharp(rgba, { raw: { width, height, channels: 4 } })

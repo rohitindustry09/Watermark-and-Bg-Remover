@@ -39,6 +39,11 @@ npm run batch -- <inputDir> <outputDir> [--model birefnet-lite|rmbg-1.4|modnet] 
 - Folders are searched recursively and the sub-folder layout is kept; re-running skips files that already exist, so an interrupted run resumes.
 - `--format webp` is typically several times smaller than PNG and keeps transparency; `jpeg` has no transparency and is flattened onto white.
 - `--zip` packs the output folder into one archive when the run ends (`zip` on Linux/macOS, the built-in `tar` on Windows; ZIP64, so over 4 GB works).
+- `--remove-watermarks` first finds tinted overlay lettering (the app's colour detector, run on a worker-thread pool) and reconstructs it with LaMa, then
+  removes the background from the cleaned image. For images you own or are authorised to edit. It targets translucent coloured text; logos,
+  white or grey marks and ownership text are not covered. `--debug-masks <dir>` writes each detected mask (cyan) over its image so you can check
+  what was found before trusting a big run. `WM_WORKERS=<n>` sets the worker count. The detector is bundled for Node by `npm run build:wm`
+  (rerun it after changing `src/wm/chroma.ts`).
 - The result is the raw model matte at the source resolution; the browser editor's edge refinement is not applied.
 - `--jobs` is how many images are in flight; use 2-3 on a PC with little RAM.
 
