@@ -63,11 +63,14 @@ export function outputToAlpha(raw, count, kind) {
  * Cut the background out of one encoded image and return it encoded as `format` (default PNG) with the matte as its alpha channel, at the
  * source resolution. `infer(floatData, dims)` runs the model and resolves to { data: Float32Array, dims: number[] } for its last output.
  */
-export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90, beforeSegment } = {}) {
+export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90, beforeSegment, timings } = {}) {
+  const lap = stopwatch(timings)
   const { data: rgba, info } = await sharp(input, { failOn: 'none' }).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height } = info
+  lap('decode')
   // Optional clean-up of the decoded pixels (e.g. watermark removal) so the model segments, and the output keeps, the cleaned image.
   if (beforeSegment) await beforeSegment({ rgba, width, height })
+  lap('clean')
   const size = modelInputSize(spec, width, height)
 
   const small = await sharp(rgba, { raw: { width, height, channels: 4 } })
@@ -77,7 +80,9 @@ export async function cutoutImage(input, spec, infer, { format = 'png', quality 
     .toBuffer()
   const tensor = rgbToTensorData(small, size.w, size.h, spec.mean, spec.std)
 
+  lap('prepare')
   const out = await infer(tensor, [1, 3, size.h, size.w])
+  lap('segment')
   const outH = Number(out.dims[out.dims.length - 2])
   const outW = Number(out.dims[out.dims.length - 1])
   const alphaSmall = outputToAlpha(out.data, outW * outH, spec.output)
@@ -91,7 +96,19 @@ export async function cutoutImage(input, spec, infer, { format = 'png', quality 
   // `rgba` is this call's own decode buffer, so the matte can be written straight into its alpha bytes (the source's own alpha is replaced).
   // sharp's joinChannel is avoided here: a removeAlpha() before it strips the joined channel again and the PNG comes out opaque.
   for (let i = 0, n = width * height; i < n; i++) rgba[i * 4 + 3] = alpha[i]
-  return encodeCutout(rgba, width, height, format, quality)
+  const encoded = await encodeCutout(rgba, width, height, format, quality)
+  lap('encode')
+  return encoded
+}
+
+/** Adds the time since the previous call to `timings[stage]` (wall-clock ms, summed over images). Does nothing without a `timings` object. */
+function stopwatch(timings) {
+  let last = performance.now()
+  return (stage) => {
+    const now = performance.now()
+    if (timings) timings[stage] = (timings[stage] ?? 0) + (now - last)
+    last = now
+  }
 }
 
 /** Output formats. `alpha: false` formats (jpeg) are flattened onto white, so the cutout shows no transparency. */

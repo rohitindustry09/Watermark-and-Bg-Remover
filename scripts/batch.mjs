@@ -66,7 +66,15 @@ async function openSession(server, spec, precision) {
 
 /** Runs the model of `state` on named input tensors ([{ name, dims, data }]) and resolves to its output tensors. */
 function makeRun(server, spec, state) {
-  const post = async (body) => fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+  // One quick retry on a dropped connection: a single reset must not fail an image in a long run.
+  const post = async (body) => {
+    try {
+      return await fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+    } catch {
+      await new Promise((r) => setTimeout(r, 500))
+      return fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+    }
+  }
   return async (feeds) => {
     const body = encodeTensors(feeds)
     let r = await post(body)
@@ -162,6 +170,7 @@ async function main() {
   let removeWatermarks
   let lamaState
   const wmStats = { withMark: 0, checked: 0 }
+  const timings = {} // wall-clock ms per stage, summed over images; the images in flight overlap, so this shows proportions, not a total
   if (opts['remove-watermarks']) {
     const lamaSpec = { url: () => LAMA_URL }
     const lamaSession = await openSession(opts.server, lamaSpec, 'fp32')
@@ -169,7 +178,9 @@ async function main() {
     console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}.`)
     const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession)
     removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
+      const t0 = performance.now()
       const found = await findWatermark(rgba, width, height)
+      timings.detect = (timings.detect ?? 0) + performance.now() - t0
       wmStats.checked++
       if (found.marks === 0) return
       wmStats.withMark++
@@ -178,7 +189,9 @@ async function main() {
         fs.mkdirSync(path.dirname(debug), { recursive: true })
         fs.writeFileSync(debug, await maskOverlay(rgba, width, height, found.mask)) // drawn before the fill, so the mask can be checked by eye
       }
+      const t1 = performance.now()
       await inpaintMasked(rgba, width, height, found.mask, found.boxes, lama)
+      timings.fill = (timings.fill ?? 0) + performance.now() - t1
     }
   }
 
@@ -197,13 +210,13 @@ async function main() {
       const { src, dest } = todo[next++]
       try {
         const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
-        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment })
+        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings })
         fs.mkdirSync(path.dirname(dest), { recursive: true })
         fs.writeFileSync(`${dest}.part`, png)
         fs.renameSync(`${dest}.part`, dest) // never leaves a half-written file that a re-run would skip
         done++
       } catch (e) {
-        failures.push({ src, error: String(e.message ?? e).split('\n')[0] })
+        failures.push({ src, error: [e.message ?? String(e), e.cause?.message ?? e.cause?.code].filter(Boolean).join(': ').split('\n')[0] })
       }
     }
   }
@@ -216,6 +229,9 @@ async function main() {
     if (failures.length > 20) console.log(`  ... and ${failures.length - 20} more`)
     process.exitCode = 1
   }
+  const processed = Math.max(1, done + failures.length)
+  const stages = ['decode', 'detect', 'fill', 'clean', 'prepare', 'segment', 'encode'].filter((k) => timings[k] !== undefined)
+  console.log(`Average ms per image by stage: ${stages.map((k) => `${k} ${Math.round(timings[k] / processed)}`).join(', ')} (${opts.jobs} images in flight overlap, so these do not add up to the per-image time)`)
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected).`)
   for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)

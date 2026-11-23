@@ -47,6 +47,24 @@ describe('inpaintMasked', () => {
     expect(px(10, 10)).toEqual([200, 100, 50, 255])
   })
 
+  it('uses one LaMa run for marks that share a window, and one per distant mark', async () => {
+    const mask = new Uint8Array(width * height)
+    for (const [x0, y0] of [[200, 280], [330, 280]]) for (let y = y0; y < y0 + 20; y++) for (let x = x0; x < x0 + 100; x++) mask[y * width + x] = 1
+    let runs = 0
+    const counting = async () => (runs++, solidGreen())
+    await wm.inpaintMasked(makeImage(), width, height, mask, [[200, 280, 300, 300], [330, 280, 430, 300]], counting)
+    expect(runs).toBe(1)
+
+    // Boxes in opposite corners of a big image cannot share a window.
+    const big = 2000
+    const bigMask = new Uint8Array(big * big)
+    bigMask[100 * big + 100] = 1
+    bigMask[1900 * big + 1900] = 1
+    runs = 0
+    await wm.inpaintMasked(Buffer.alloc(big * big * 4), big, big, bigMask, [[90, 90, 110, 110], [1890, 1890, 1910, 1910]], counting)
+    expect(runs).toBe(2)
+  })
+
   it('does nothing when the mask is empty', async () => {
     const rgba = makeImage()
     const before = Buffer.from(rgba)

@@ -66,8 +66,12 @@ export function cropWindow(box, width, height) {
  */
 export async function inpaintMasked(rgba, width, height, mask, boxes, lama) {
   const n = LAMA_SIZE
+  const done = []
   for (const box of boxes) {
+    // A window already filled covers every masked pixel inside it, so a mark lying wholly within one needs no run of its own.
+    if (done.some((w) => box[0] >= w.left && box[2] <= w.left + w.side && box[1] >= w.top && box[3] <= w.top + w.side)) continue
     const { left, top, side } = cropWindow(box, width, height)
+    done.push({ left, top, side })
 
     const rgb = await sharp(rgba, { raw: { width, height, channels: 4 } })
       .extract({ left, top, width: side, height: side })
