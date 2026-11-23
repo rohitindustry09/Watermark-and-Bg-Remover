@@ -160,8 +160,15 @@ async function handle(req, res) {
     const feeds = {}
     for (const t of decodeTensors(await readBody(req))) feeds[t.name] = new ort.Tensor('float32', t.data, t.dims)
     let out
+    let runMs = 0 // the model call itself, without the wait for the provider's lane
+    const timed = (session) => async () => {
+      const t0 = performance.now()
+      const result = await session.run(feeds)
+      runMs = performance.now() - t0
+      return result
+    }
     try {
-      out = await exclusive(entry.provider, () => entry.session.run(feeds))
+      out = await exclusive(entry.provider, timed(entry.session))
     } catch (e) {
       if (entry.provider === 'cpu') throw e
       // The GPU failed on a real input: move this model to the CPU for good and retry once.
@@ -169,10 +176,10 @@ async function handle(req, res) {
       providerFor.set(entry.file, 'cpu')
       entry.session = await exclusive('cpu', () => ort.InferenceSession.create(entry.file, options('cpu')))
       entry.provider = 'cpu'
-      out = await exclusive('cpu', () => entry.session.run(feeds))
+      out = await exclusive('cpu', timed(entry.session))
     }
     const body = encodeTensors(entry.session.outputNames.map((name) => ({ name, dims: out[name].dims.map(Number), data: Float32Array.from(out[name].data) })))
-    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Provider': entry.provider })
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Provider': entry.provider, 'X-Run-Ms': String(Math.round(runMs)) })
     return res.end(body)
   }
   if (req.method === 'POST' && url.pathname === '/api/release') {
@@ -199,7 +206,7 @@ const server = http.createServer((req, res) => {
       return res.end()
     }
     res.setHeader('Access-Control-Allow-Origin', origin)
-    res.setHeader('Access-Control-Expose-Headers', 'X-Provider')
+    res.setHeader('Access-Control-Expose-Headers', 'X-Provider, X-Run-Ms')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
     res.setHeader('Vary', 'Origin')
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
@@ -215,4 +222,8 @@ const server = http.createServer((req, res) => {
   })
 })
 server.requestTimeout = 0
+// Node closes an idle keep-alive connection after 5 s by default; a client that reuses it at that moment gets ECONNRESET. A long batch pauses
+// longer than that between requests on a pooled connection, so keep them open well past any realistic gap.
+server.keepAliveTimeout = 120_000
+server.headersTimeout = 125_000
 server.listen(PORT, '127.0.0.1', () => log(`inference server on http://127.0.0.1:${PORT} - providers: ${PROVIDERS.join(' > ')} - models: ${MODEL_DIR}`))

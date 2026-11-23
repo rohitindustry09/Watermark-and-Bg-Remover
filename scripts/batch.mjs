@@ -9,6 +9,7 @@ import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
 import { findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
+import { RoiPlanner } from '../server/wm-roi.mjs'
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif|tiff?|bmp|gif)$/i
 
@@ -17,7 +18,7 @@ function parseArgs(argv) {
   const opts = { model: 'birefnet-lite', jobs: 6, precision: 'fp16', format: 'png', quality: 90, server: process.env.INFERENCE_URL ?? 'http://127.0.0.1:8787' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--remove-watermarks') opts['remove-watermarks'] = true
+    if (a === '--remove-watermarks' || a === '--wm-learn') opts[a.slice(2)] = true
     else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
     else positional.push(a)
   }
@@ -66,13 +67,15 @@ async function openSession(server, spec, precision) {
 
 /** Runs the model of `state` on named input tensors ([{ name, dims, data }]) and resolves to its output tensors. */
 function makeRun(server, spec, state) {
-  // One quick retry on a dropped connection: a single reset must not fail an image in a long run.
+  // Retries a dropped connection (up to 3 attempts, short backoff): a single reset must not fail an image in a long run.
   const post = async (body) => {
-    try {
-      return await fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
-    } catch {
-      await new Promise((r) => setTimeout(r, 500))
-      return fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fetch(`${server}/api/run?sid=${state.sid}`, { method: 'POST', body })
+      } catch (e) {
+        if (attempt >= 3) throw e
+        await new Promise((r) => setTimeout(r, 400 * attempt))
+      }
     }
   }
   return async (feeds) => {
@@ -83,7 +86,9 @@ function makeRun(server, spec, state) {
       r = await post(body)
     }
     if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error ?? `server returned ${r.status}`))
-    return decodeTensors(Buffer.from(await r.arrayBuffer()))
+    const outputs = decodeTensors(Buffer.from(await r.arrayBuffer()))
+    outputs.runMs = Number(r.headers.get('X-Run-Ms')) || 0 // time inside the model on the server, without queueing
+    return outputs
   }
 }
 
@@ -99,6 +104,7 @@ function makeLama(run, session, timings) {
       { name: maskName, dims: [1, 1, n, n], data: mask },
     ])
     timings.lamaCall = (timings.lamaCall ?? 0) + performance.now() - t0 // the model call alone (queue + GPU + transfer)
+    timings.lamaExec = (timings.lamaExec ?? 0) + out.runMs
     const data = out[0].data
     let max = 0
     for (let i = 0; i < data.length; i += 97) if (data[i] > max) max = data[i]
@@ -134,7 +140,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--remove-watermarks] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--remove-watermarks [--wm-learn]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -166,12 +172,19 @@ async function main() {
   const state = { sid: session.sid, inputName: session.inputNames[0], precision: session.precision }
   console.log(`Model ready on ${session.provider} (${session.precision}).`)
   const run = makeRun(opts.server, spec, state)
-  const infer = async (data, dims) => (await run([{ name: state.inputName, dims, data }])).at(-1)
+  const infer = async (data, dims) => {
+    const outputs = await run([{ name: state.inputName, dims, data }])
+    timings.segmentExec = (timings.segmentExec ?? 0) + outputs.runMs
+    return outputs.at(-1)
+  }
 
   // Watermark removal: LaMa fills what the colour detector marks, before the background is removed.
   let removeWatermarks
   let lamaState
-  const wmStats = { withMark: 0, checked: 0 }
+  const wmStats = { withMark: 0, checked: 0, regional: 0 }
+  // Every image is searched in full by default: a watermark can sit in a different place on different photos. --wm-learn opts in to learning the
+  // region from the first images and searching only there (much faster, but a mark elsewhere on a later image can be missed; every 25th image is still checked in full).
+  const planner = new RoiPlanner(opts['wm-learn'] ? {} : { warmup: Infinity })
   const timings = {} // wall-clock ms per stage, summed over images; the images in flight overlap, so this shows proportions, not a total
   if (opts['remove-watermarks']) {
     const lamaSpec = { url: () => LAMA_URL }
@@ -181,7 +194,10 @@ async function main() {
     const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession, timings)
     removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
       const t0 = performance.now()
-      const found = await findWatermark(rgba, width, height)
+      const plan = planner.next()
+      const found = await findWatermark(rgba, width, height, { region: plan.region })
+      if (!plan.region) planner.reportFull(found.boxes.map(([x0, y0, x1, y1]) => [x0 / width, y0 / height, x1 / width, y1 / height].map((v) => Math.min(1, Math.max(0, v)))))
+      wmStats.regional += plan.region ? 1 : 0
       timings.detect = (timings.detect ?? 0) + performance.now() - t0
       timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
@@ -233,10 +249,10 @@ async function main() {
     process.exitCode = 1
   }
   const processed = Math.max(1, done + failures.length)
-  const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'clean', 'prepare', 'segment', 'encode'].filter((k) => timings[k] !== undefined)
+  const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'lamaExec', 'clean', 'prepare', 'segment', 'segmentExec', 'encode'].filter((k) => timings[k] !== undefined)
   console.log(`Average ms per image by stage: ${stages.map((k) => `${k} ${Math.round(timings[k] / processed)}`).join(', ')} (${opts.jobs} images in flight overlap, so these do not add up to the per-image time)`)
   if (removeWatermarks) await closeWatermarkPool()
-  if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected).`)
+  if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected). ${!opts['wm-learn'] ? 'Full-image search on every image.' : `Searched only the learned region on ${wmStats.regional} images (region ${planner.roi ? planner.roi.map((v) => v.toFixed(2)).join(',') : 'not learned'}; widened ${planner.widened}x by the periodic full checks).`}`)
   for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)
   if (opts.zip) zipFolder(outputDir, opts.zip)
 }

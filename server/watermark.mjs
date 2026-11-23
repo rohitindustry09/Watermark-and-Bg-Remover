@@ -3,6 +3,7 @@
 import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
 import { detectInWorker } from './wm-pool.mjs'
+import { regionToPixels } from './wm-roi.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
@@ -25,11 +26,8 @@ async function resizePlane(plane, sw, sh, dw, dh, kernel) {
   return new Uint8Array(out.buffer, out.byteOffset, out.length)
 }
 
-/**
- * Finds overlay lettering. Returns the 0/1 mask at full resolution (already grown to cover the soft edge of the letters), the boxes of the
- * marks and how many marks were found. The mask is all zero when nothing was found.
- */
-export async function findWatermark(rgba, width, height) {
+/** Whole-image search: the detector on a (possibly reduced) copy, with the mask scaled back to the image's own resolution. */
+async function detectIn(rgba, width, height) {
   const scale = Math.min(1, detectEdge() / Math.max(width, height))
   const dw = Math.max(1, Math.round(width * scale))
   const dh = Math.max(1, Math.round(height * scale))
@@ -52,6 +50,23 @@ export async function findWatermark(rgba, width, height) {
   const mask = scale === 1 ? plane : await resizePlane(plane, dw, dh, width, height, 'nearest')
   const boxes = marks.map((m) => m.box.map((v, i) => Math.round(v / scale) + (i < 2 ? -8 : 8)))
   return { mask, boxes, marks: marks.length, detectMs }
+}
+
+/**
+ * Finds overlay lettering. Returns the 0/1 mask at full resolution (already grown to cover the soft edge of the letters), the boxes of the
+ * marks and how many marks were found. The mask is all zero when nothing was found. `region` (a box in 0..1 image fractions) limits the
+ * search to that part of the image, which is much cheaper; boxes and mask still refer to the whole image.
+ */
+export async function findWatermark(rgba, width, height, { region } = {}) {
+  if (!region) return detectIn(rgba, width, height)
+  const win = regionToPixels(region, width, height)
+  const crop = await sharp(rgba, { raw: { width, height, channels: 4 } }).extract(win).raw().toBuffer()
+  const found = await detectIn(crop, win.width, win.height)
+  if (found.marks === 0) return { ...found, mask: new Uint8Array(width * height) }
+  const mask = new Uint8Array(width * height)
+  for (let y = 0; y < win.height; y++) mask.set(found.mask.subarray(y * win.width, (y + 1) * win.width), (win.top + y) * width + win.left)
+  const boxes = found.boxes.map(([x0, y0, x1, y1]) => [x0 + win.left, y0 + win.top, x1 + win.left, y1 + win.top])
+  return { ...found, mask, boxes }
 }
 
 /** Square crop window of at least LAMA_SIZE px (the native resolution, so strokes are not blurred), centred on the box and kept inside the image. */

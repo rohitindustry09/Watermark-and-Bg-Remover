@@ -61,13 +61,14 @@ function smoothBackground(plane: Float32Array, w: number, h: number, f: number, 
       small[y * sw + x] = s / c
     }
   const med = new Float32Array(sw * sh)
-  const buf: number[] = []
+  // A typed array sorts numerically without a comparator callback, which is several times faster than sorting a plain array of numbers.
+  const buf = new Float32Array((2 * r + 1) * (2 * r + 1))
   for (let y = 0; y < sh; y++)
     for (let x = 0; x < sw; x++) {
-      buf.length = 0
-      for (let yy = Math.max(0, y - r); yy <= Math.min(sh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(sw - 1, x + r); xx++) buf.push(small[yy * sw + xx])
-      buf.sort((p, q) => p - q)
-      med[y * sw + x] = buf[buf.length >> 1]
+      let len = 0
+      for (let yy = Math.max(0, y - r); yy <= Math.min(sh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(sw - 1, x + r); xx++) buf[len++] = small[yy * sw + xx]
+      buf.subarray(0, len).sort()
+      med[y * sw + x] = buf[len >> 1]
     }
   return (x, y) => {
     const fx = Math.min(sw - 1, Math.max(0, (x + 0.5) / f - 0.5))
@@ -86,6 +87,22 @@ interface Labels {
   labels: Int32Array
   count: number
   sizes: number[]
+}
+
+/**
+ * One cross-shaped (4-neighbour) dilation step: identical to `dilateBinary(m, w, h, 1)`, in a single cheap pass. The growth loop below calls it up
+ * to six times for each of twelve colour windows, where the general routine's distance maths dominated the detector's run time.
+ */
+export function crossDilate(m: Uint8Array, w: number, h: number): Uint8Array {
+  const out = new Uint8Array(m.length)
+  for (let y = 0; y < h; y++) {
+    const row = y * w
+    for (let x = 0; x < w; x++) {
+      const i = row + x
+      if (m[i] || (x > 0 && m[i - 1]) || (x < w - 1 && m[i + 1]) || (y > 0 && m[i - w]) || (y < h - 1 && m[i + w])) out[i] = 1
+    }
+  }
+  return out
 }
 
 /** 8-connected components of a binary plane. */
@@ -390,7 +407,7 @@ export function detectChromaText(rgba: Uint8ClampedArray, w: number, h: number):
       const i = y * w + x
       const da = a[i] - bgA(x, y)
       const db = b[i] - bgB(x, y)
-      const mag = Math.hypot(da, db)
+      const mag = Math.sqrt(da * da + db * db) // Math.hypot is several times slower and this runs once per pixel
       if (mag < WEAK_SHIFT) continue
       angle[i] = (Math.atan2(db, da) * 180) / Math.PI
       if (mag < SHIFT) {
@@ -415,7 +432,7 @@ export function detectChromaText(rgba: Uint8ClampedArray, w: number, h: number):
     if (any < 60) continue
     let grown: Uint8Array = win
     for (let step = 0; step < GROW; step++) {
-      const ring = dilateBinary(grown, w, h, 1)
+      const ring = crossDilate(grown, w, h)
       const next = grown.slice()
       let added = 0
       for (let i = 0; i < n; i++) {

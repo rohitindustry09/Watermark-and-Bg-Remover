@@ -99,13 +99,13 @@ function smoothBackground(plane, w, h, f, r) {
       small[y * sw + x] = s / c;
     }
   const med = new Float32Array(sw * sh);
-  const buf = [];
+  const buf = new Float32Array((2 * r + 1) * (2 * r + 1));
   for (let y = 0; y < sh; y++)
     for (let x = 0; x < sw; x++) {
-      buf.length = 0;
-      for (let yy = Math.max(0, y - r); yy <= Math.min(sh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(sw - 1, x + r); xx++) buf.push(small[yy * sw + xx]);
-      buf.sort((p, q) => p - q);
-      med[y * sw + x] = buf[buf.length >> 1];
+      let len = 0;
+      for (let yy = Math.max(0, y - r); yy <= Math.min(sh - 1, y + r); yy++) for (let xx = Math.max(0, x - r); xx <= Math.min(sw - 1, x + r); xx++) buf[len++] = small[yy * sw + xx];
+      buf.subarray(0, len).sort();
+      med[y * sw + x] = buf[len >> 1];
     }
   return (x, y) => {
     const fx = Math.min(sw - 1, Math.max(0, (x + 0.5) / f - 0.5));
@@ -118,6 +118,17 @@ function smoothBackground(plane, w, h, f, r) {
     const ty = fy - y0;
     return (med[y0 * sw + x0] * (1 - tx) + med[y0 * sw + x1] * tx) * (1 - ty) + (med[y1 * sw + x0] * (1 - tx) + med[y1 * sw + x1] * tx) * ty;
   };
+}
+function crossDilate(m, w, h) {
+  const out = new Uint8Array(m.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const i = row + x;
+      if (m[i] || x > 0 && m[i - 1] || x < w - 1 && m[i + 1] || y > 0 && m[i - w] || y < h - 1 && m[i + w]) out[i] = 1;
+    }
+  }
+  return out;
 }
 function components(mask, w, h) {
   const labels = new Int32Array(w * h).fill(-1);
@@ -364,7 +375,7 @@ function detectChromaText(rgba, w, h) {
       const i = y * w + x;
       const da = a[i] - bgA(x, y);
       const db = b[i] - bgB(x, y);
-      const mag = Math.hypot(da, db);
+      const mag = Math.sqrt(da * da + db * db);
       if (mag < WEAK_SHIFT) continue;
       angle[i] = Math.atan2(db, da) * 180 / Math.PI;
       if (mag < SHIFT) {
@@ -388,7 +399,7 @@ function detectChromaText(rgba, w, h) {
     if (any < 60) continue;
     let grown = win;
     for (let step = 0; step < GROW; step++) {
-      const ring = dilateBinary(grown, w, h, 1);
+      const ring = crossDilate(grown, w, h);
       const next = grown.slice();
       let added = 0;
       for (let i = 0; i < n; i++) {
