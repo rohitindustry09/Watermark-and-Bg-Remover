@@ -41,9 +41,15 @@ npm run batch -- <inputDir> <outputDir> [--model birefnet-lite|rmbg-1.4|modnet] 
 - `--zip` packs the output folder into one archive when the run ends (`zip` on Linux/macOS, the built-in `tar` on Windows; ZIP64, so over 4 GB works).
 - `--remove-watermarks` first finds tinted overlay lettering (the app's colour detector, run on a worker-thread pool) and reconstructs it with LaMa, then
   removes the background from the cleaned image. For images you own or are authorised to edit. It targets translucent coloured text; logos,
-  white or grey marks and ownership text are not covered. Every image is searched in full, since a mark can sit in a different place on different photos; `--wm-learn` instead learns the region from the first images and searches only there for the rest (several times faster, but a mark that appears elsewhere on a later image can be missed). `--debug-masks <dir>` writes each detected mask (cyan) over its image so you can check
-  what was found before trusting a big run. `WM_WORKERS=<n>` sets the worker count. The detector is bundled for Node by `npm run build:wm`
-  (rerun it after changing `src/wm/chroma.ts`).
+  white or grey marks and ownership text are not covered. Every image is searched in full. `--debug-masks <dir>` writes each detected mask (cyan)
+  over its image so you can check what was found before trusting a big run. `WM_WORKERS=<n>` sets the worker count. The detector is bundled for
+  Node by `npm run build:wm` (rerun it after changing `src/wm/chroma.ts`).
+- A watermark that is the same everywhere (same text, colours and font; only its position and size change) is found faster and more exactly by a
+  learned pattern: `npm run learn-wm -- <originals folder> --out wm-pattern.json` averages its letter shape over many photos and reports how well
+  it separates the real mark from everything else; then add `--wm-template wm-pattern.json` to the batch. The whole image is searched in about
+  0.15 s, the mask follows the letter shapes, and every image gets a status in `watermark-report.csv` in the output folder (`found`, `uncertain`,
+  `colour-backup`, `none`). Weak matches fall back to the colour detector; `--wm-double-check` also runs it on images where the pattern found nothing.
+  Learn from the original photos, not cutouts (a cutout cuts the watermark off where the background was).
 - The result is the raw model matte at the source resolution; the browser editor's edge refinement is not applied.
 - `--jobs` is how many images are in flight; use 2-3 on a PC with little RAM.
 

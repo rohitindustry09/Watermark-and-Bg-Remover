@@ -13,7 +13,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "batch": "node scripts/batch.mjs",
-    "build:wm": "esbuild server/wm-entry.ts --bundle --format=esm --platform=node --outfile=server/vendor/wm.mjs"
+    "build:wm": "esbuild server/wm-entry.ts --bundle --format=esm --platform=node --outfile=server/vendor/wm.mjs",
+    "learn-wm": "node scripts/learn-wm.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",

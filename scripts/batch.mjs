@@ -7,9 +7,9 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
-import { findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
+import { findByTemplate, findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
-import { RoiPlanner } from '../server/wm-roi.mjs'
+import { parseTemplate } from '../server/wm-template.mjs'
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif|tiff?|bmp|gif)$/i
 
@@ -18,7 +18,7 @@ function parseArgs(argv) {
   const opts = { model: 'birefnet-lite', jobs: 6, precision: 'fp16', format: 'png', quality: 90, server: process.env.INFERENCE_URL ?? 'http://127.0.0.1:8787' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--remove-watermarks' || a === '--wm-learn') opts[a.slice(2)] = true
+    if (a === '--remove-watermarks' || a === '--wm-double-check') opts[a.slice(2)] = true
     else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
     else positional.push(a)
   }
@@ -113,6 +113,13 @@ function makeLama(run, session, timings) {
   }
 }
 
+function csvRows(rows) {
+  const cell = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replaceAll('"', '""')}"` : String(v))
+  const keys = Object.keys(rows[0])
+  const lines = [...rows].sort((a, b) => a.file.localeCompare(b.file)).map((r) => keys.map((k) => cell(r[k])).join(','))
+  return `${[keys.join(','), ...lines].join('\n')}\n`
+}
+
 /**
  * Pack a folder into one zip with the system tools, which write ZIP64 so archives over 4 GB work: `zip -0` (store only, outputs are already
  * compressed) on Linux/macOS, and the `tar` that ships with Windows 10+ (bsdtar) on Windows.
@@ -140,7 +147,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--remove-watermarks [--wm-learn]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -181,26 +188,37 @@ async function main() {
   // Watermark removal: LaMa fills what the colour detector marks, before the background is removed.
   let removeWatermarks
   let lamaState
-  const wmStats = { withMark: 0, checked: 0, regional: 0 }
-  // Every image is searched in full by default: a watermark can sit in a different place on different photos. --wm-learn opts in to learning the
-  // region from the first images and searching only there (much faster, but a mark elsewhere on a later image can be missed; every 25th image is still checked in full).
-  const planner = new RoiPlanner(opts['wm-learn'] ? {} : { warmup: Infinity })
+  const wmStats = { withMark: 0, checked: 0 }
+  const wmRows = [] // one row per image for watermark-report.csv
   const timings = {} // wall-clock ms per stage, summed over images; the images in flight overlap, so this shows proportions, not a total
-  if (opts['remove-watermarks']) {
+  if (opts['remove-watermarks'] || opts['wm-template']) {
+    const pattern = opts['wm-template'] ? parseTemplate(fs.readFileSync(opts['wm-template'], 'utf8')) : null
     const lamaSpec = { url: () => LAMA_URL }
     const lamaSession = await openSession(opts.server, lamaSpec, 'fp32')
     lamaState = { sid: lamaSession.sid, precision: 'fp32' }
-    console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}.`)
+    console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}. Finder: ${pattern ? 'learned pattern' : 'colour detector (every image, in full)'}.`)
     const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession, timings)
+
+    /** The pattern finder first; its weaker matches (and, with --wm-double-check, its misses) get the colour detector as a second opinion. */
+    const findMarks = async (rgba, width, height) => {
+      if (!pattern) return { ...(await findWatermark(rgba, width, height)), status: 'found', score: 1 }
+      const found = await findByTemplate(rgba, width, height, pattern)
+      if (found.status === 'found') return found
+      if (found.status === 'uncertain' || opts['wm-double-check']) {
+        const backup = await findWatermark(rgba, width, height)
+        if (backup.marks > 0) return { ...backup, status: 'colour-backup', score: found.score }
+      }
+      return found
+    }
+
     removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
       const t0 = performance.now()
-      const plan = planner.next()
-      const found = await findWatermark(rgba, width, height, { region: plan.region })
-      if (!plan.region) planner.reportFull(found.boxes.map(([x0, y0, x1, y1]) => [x0 / width, y0 / height, x1 / width, y1 / height].map((v) => Math.min(1, Math.max(0, v)))))
-      wmStats.regional += plan.region ? 1 : 0
+      const found = await findMarks(rgba, width, height)
       timings.detect = (timings.detect ?? 0) + performance.now() - t0
       timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
+      const box = found.tight?.[0]
+      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', score: found.score.toFixed(2), x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
       if (found.marks === 0) return
       wmStats.withMark++
       if (opts['debug-masks']) {
@@ -252,7 +270,14 @@ async function main() {
   const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'lamaExec', 'clean', 'prepare', 'segment', 'segmentExec', 'encode'].filter((k) => timings[k] !== undefined)
   console.log(`Average ms per image by stage: ${stages.map((k) => `${k} ${Math.round(timings[k] / processed)}`).join(', ')} (${opts.jobs} images in flight overlap, so these do not add up to the per-image time)`)
   if (removeWatermarks) await closeWatermarkPool()
-  if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected). ${!opts['wm-learn'] ? 'Full-image search on every image.' : `Searched only the learned region on ${wmStats.regional} images (region ${planner.roi ? planner.roi.map((v) => v.toFixed(2)).join(',') : 'not learned'}; widened ${planner.widened}x by the periodic full checks).`}`)
+  if (removeWatermarks) {
+    const by = (s) => wmRows.filter((r) => r.status === s).length
+    console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
+    if (wmRows.length) {
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'watermark-report.csv'), csvRows(wmRows))
+    }
+  }
   for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)
   if (opts.zip) zipFolder(outputDir, opts.zip)
 }

@@ -3,7 +3,7 @@
 import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
 import { detectInWorker } from './wm-pool.mjs'
-import { regionToPixels } from './wm-roi.mjs'
+import { evidenceMap, matchTemplate, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
@@ -34,7 +34,7 @@ async function detectIn(rgba, width, height) {
   const small = scale === 1 ? rgba : await sharp(rgba, { raw: { width, height, channels: 4 } }).resize(dw, dh, { fit: 'fill', kernel: 'lanczos3' }).raw().toBuffer()
 
   const { marks, ms: detectMs } = await detectInWorker(small, dw, dh) // CPU-heavy: runs on a worker thread, many images at once
-  if (marks.length === 0) return { mask: new Uint8Array(width * height), boxes: [], marks: 0, detectMs }
+  if (marks.length === 0) return { mask: new Uint8Array(width * height), boxes: [], tight: [], marks: 0, detectMs }
 
   let plane = new Uint8Array(dw * dh)
   let grow = 2
@@ -48,25 +48,77 @@ async function detectIn(rgba, width, height) {
   plane = dilateBinary(plane, dw, dh, Math.min(grow + (scale < 1 ? 1 : 0), 7))
 
   const mask = scale === 1 ? plane : await resizePlane(plane, dw, dh, width, height, 'nearest')
-  const boxes = marks.map((m) => m.box.map((v, i) => Math.round(v / scale) + (i < 2 ? -8 : 8)))
-  return { mask, boxes, marks: marks.length, detectMs }
+  const tight = marks.map((m) => m.box.map((v) => Math.round(v / scale))) // the letters' own bounding boxes, without the fill margin
+  const boxes = tight.map((b) => b.map((v, i) => v + (i < 2 ? -8 : 8)))
+  return { mask, boxes, tight, marks: marks.length, detectMs }
 }
 
 /**
- * Finds overlay lettering. Returns the 0/1 mask at full resolution (already grown to cover the soft edge of the letters), the boxes of the
- * marks and how many marks were found. The mask is all zero when nothing was found. `region` (a box in 0..1 image fractions) limits the
- * search to that part of the image, which is much cheaper; boxes and mask still refer to the whole image.
+ * Finds overlay lettering with the colour detector. Returns the 0/1 mask at full resolution (already grown to cover the soft edge of the letters), the
+ * boxes of the marks (`tight` = the letters' own boxes) and how many marks were found. The mask is all zero when nothing was found.
  */
-export async function findWatermark(rgba, width, height, { region } = {}) {
-  if (!region) return detectIn(rgba, width, height)
-  const win = regionToPixels(region, width, height)
-  const crop = await sharp(rgba, { raw: { width, height, channels: 4 } }).extract(win).raw().toBuffer()
-  const found = await detectIn(crop, win.width, win.height)
-  if (found.marks === 0) return { ...found, mask: new Uint8Array(width * height) }
-  const mask = new Uint8Array(width * height)
-  for (let y = 0; y < win.height; y++) mask.set(found.mask.subarray(y * win.width, (y + 1) * win.width), (win.top + y) * width + win.left)
-  const boxes = found.boxes.map(([x0, y0, x1, y1]) => [x0 + win.left, y0 + win.top, x1 + win.left, y1 + win.top])
-  return { ...found, mask, boxes }
+export const findWatermark = detectIn
+
+/**
+ * Adds, in place, the pixels next to the mask that still carry the watermark's tint (an anti-aliased edge, a letter the learned shape was a little short
+ * of). A pixel joins when its evidence is at least a quarter of the typical evidence under the mask and it lies within `reach` pixels of the original
+ * mask, so the growth finishes the letters and cannot wander into the engraving. Works on the evidence crop only.
+ */
+export function growOntoEvidence(plane, width, ev, reach) {
+  const { E, left, top, w, h } = ev
+  const local = new Uint8Array(w * h)
+  const under = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (plane[(top + y) * width + left + x]) {
+        local[y * w + x] = 1
+        under.push(E[y * w + x])
+      }
+    }
+  }
+  if (under.length < 50) return
+  under.sort((a, b) => a - b)
+  const strong = under[Math.floor(under.length * 0.75)]
+  const need = Math.max(1.5, 0.25 * strong)
+  const zone = dilateBinary(local, w, h, reach)
+  let grown = local
+  for (let step = 0; step < reach; step++) {
+    const ring = dilateBinary(grown, w, h, 1)
+    const next = grown.slice()
+    for (let i = 0; i < next.length; i++) if (!next[i] && ring[i] && zone[i] && E[i] >= need) next[i] = 1
+    grown = next
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (grown[y * w + x]) plane[(top + y) * width + left + x] = 1
+}
+
+/**
+ * Finds the watermark by its learned pattern (see wm-template.mjs). Searches the whole image; takes ~0.15 s instead of the colour detector's seconds.
+ * status: 'found' (score at or above the pattern's threshold), 'uncertain' (a weaker match, probably in the right place) or 'none'. The mask is the learned
+ * letter shape placed at the match, so it follows the letters instead of a blob around them; it is empty unless the status is 'found'.
+ */
+export async function findByTemplate(rgba, width, height, tpl) {
+  const t0 = performance.now()
+  const map = await evidenceMap(rgba, width, height)
+  const match = matchTemplate(map, tpl)
+  const detectMs = performance.now() - t0
+  const score = Math.max(0, match.score)
+  const status = score >= tpl.threshold ? 'found' : score >= 0.75 * tpl.threshold ? 'uncertain' : 'none'
+  const empty = { mask: new Uint8Array(width * height), boxes: [], tight: [], marks: 0, score, status, detectMs, match: null }
+  if (status !== 'found') return { ...empty, match: match.score > 0 ? { x: match.x, y: match.y, tw: match.tw, th: match.th } : null }
+
+  const { x: x0, y: y0, tw, th, evidence } = refineMatch(rgba, width, height, map, tpl, match) // full-resolution placement
+  const up = Math.max(width, height) / WORK_EDGE
+  const shape = resample(tpl.shape, tpl.cw, tpl.ch, tw, th)
+  let plane = new Uint8Array(width * height)
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      if (shape[y * tw + x] >= 0.5 && x0 + x >= 0 && x0 + x < width && y0 + y >= 0 && y0 + y < height) plane[(y0 + y) * width + x0 + x] = 1
+    }
+  }
+  plane = dilateBinary(plane, width, height, Math.max(2, Math.round(up * 0.75))) // a little margin over the letters' soft edge
+  if (evidence) growOntoEvidence(plane, width, evidence, Math.round(up * 1.25))
+  const box = [x0, y0, x0 + tw, y0 + th]
+  return { mask: plane, boxes: [box.map((v, i) => v + (i < 2 ? -8 : 8))], tight: [box], marks: 1, score, status, detectMs, match: { x: match.x, y: match.y, tw: match.tw, th: match.th } }
 }
 
 /** Square crop window of at least LAMA_SIZE px (the native resolution, so strokes are not blurred), centred on the box and kept inside the image. */
