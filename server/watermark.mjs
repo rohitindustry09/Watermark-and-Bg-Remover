@@ -6,8 +6,11 @@ import { detectInWorker } from './wm-pool.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
-/** Detection runs on a copy no larger than this on its long side; the mask is scaled back up. */
-const DETECT_EDGE = 2048
+/**
+ * Detection runs on a copy no larger than this on its long side (override with WM_DETECT_EDGE); the mask is scaled back up. The detector costs
+ * about 3 s per megapixel, and overlay lettering is still tens of pixels tall at this size, so a smaller copy is much cheaper and as accurate.
+ */
+const detectEdge = () => Number(process.env.WM_DETECT_EDGE) || 1024
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
@@ -27,13 +30,13 @@ async function resizePlane(plane, sw, sh, dw, dh, kernel) {
  * marks and how many marks were found. The mask is all zero when nothing was found.
  */
 export async function findWatermark(rgba, width, height) {
-  const scale = Math.min(1, DETECT_EDGE / Math.max(width, height))
+  const scale = Math.min(1, detectEdge() / Math.max(width, height))
   const dw = Math.max(1, Math.round(width * scale))
   const dh = Math.max(1, Math.round(height * scale))
   const small = scale === 1 ? rgba : await sharp(rgba, { raw: { width, height, channels: 4 } }).resize(dw, dh, { fit: 'fill', kernel: 'lanczos3' }).raw().toBuffer()
 
-  const marks = await detectInWorker(small, dw, dh) // CPU-heavy: runs on a worker thread, many images at once
-  if (marks.length === 0) return { mask: new Uint8Array(width * height), boxes: [], marks: 0 }
+  const { marks, ms: detectMs } = await detectInWorker(small, dw, dh) // CPU-heavy: runs on a worker thread, many images at once
+  if (marks.length === 0) return { mask: new Uint8Array(width * height), boxes: [], marks: 0, detectMs }
 
   let plane = new Uint8Array(dw * dh)
   let grow = 2
@@ -43,11 +46,12 @@ export async function findWatermark(rgba, width, height) {
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (m.mask[(y - y0) * bw + (x - x0)]) plane[y * dw + x] = 1
     grow = Math.max(grow, Math.round(m.stroke * 0.5) + 1)
   }
-  plane = dilateBinary(plane, dw, dh, Math.min(grow, 6))
+  // One extra step when the detector ran on a reduced copy: the letter edges land between low-resolution pixels, and the fill should cover them.
+  plane = dilateBinary(plane, dw, dh, Math.min(grow + (scale < 1 ? 1 : 0), 7))
 
   const mask = scale === 1 ? plane : await resizePlane(plane, dw, dh, width, height, 'nearest')
   const boxes = marks.map((m) => m.box.map((v, i) => Math.round(v / scale) + (i < 2 ? -8 : 8)))
-  return { mask, boxes, marks: marks.length }
+  return { mask, boxes, marks: marks.length, detectMs }
 }
 
 /** Square crop window of at least LAMA_SIZE px (the native resolution, so strokes are not blurred), centred on the box and kept inside the image. */

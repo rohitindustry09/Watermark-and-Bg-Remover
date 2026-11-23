@@ -88,15 +88,17 @@ function makeRun(server, spec, state) {
 }
 
 /** LaMa as `(imageCHW, mask) => filledCHW` floats in 0..1 (the Carve export returns 0..255, which is detected and scaled). */
-function makeLama(run, session) {
+function makeLama(run, session, timings) {
   const n = LAMA_SIZE
   const imgName = session.inputNames.find((k) => !/mask/i.test(k)) ?? session.inputNames[0]
   const maskName = session.inputNames.find((k) => /mask/i.test(k)) ?? session.inputNames[1]
   return async (image, mask) => {
+    const t0 = performance.now()
     const out = await run([
       { name: imgName, dims: [1, 3, n, n], data: image },
       { name: maskName, dims: [1, 1, n, n], data: mask },
     ])
+    timings.lamaCall = (timings.lamaCall ?? 0) + performance.now() - t0 // the model call alone (queue + GPU + transfer)
     const data = out[0].data
     let max = 0
     for (let i = 0; i < data.length; i += 97) if (data[i] > max) max = data[i]
@@ -176,11 +178,12 @@ async function main() {
     const lamaSession = await openSession(opts.server, lamaSpec, 'fp32')
     lamaState = { sid: lamaSession.sid, precision: 'fp32' }
     console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}.`)
-    const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession)
+    const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession, timings)
     removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
       const t0 = performance.now()
       const found = await findWatermark(rgba, width, height)
       timings.detect = (timings.detect ?? 0) + performance.now() - t0
+      timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
       if (found.marks === 0) return
       wmStats.withMark++
@@ -230,7 +233,7 @@ async function main() {
     process.exitCode = 1
   }
   const processed = Math.max(1, done + failures.length)
-  const stages = ['decode', 'detect', 'fill', 'clean', 'prepare', 'segment', 'encode'].filter((k) => timings[k] !== undefined)
+  const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'clean', 'prepare', 'segment', 'encode'].filter((k) => timings[k] !== undefined)
   console.log(`Average ms per image by stage: ${stages.map((k) => `${k} ${Math.round(timings[k] / processed)}`).join(', ')} (${opts.jobs} images in flight overlap, so these do not add up to the per-image time)`)
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) console.log(`Watermark found and removed on ${wmStats.withMark} of ${wmStats.checked} images (the rest had none detected).`)

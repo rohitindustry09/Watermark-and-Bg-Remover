@@ -28,12 +28,12 @@ function start() {
   workers = Array.from({ length: poolSize() }, () => {
     const worker = new Worker(WORKER_FILE)
     worker.unref() // an idle pool never keeps the process alive
-    worker.on('message', ({ id, marks, error }) => {
+    worker.on('message', ({ id, marks, ms, error }) => {
       const task = pending.get(id)
       pending.delete(id)
       idle.push(worker)
       if (error) task.reject(new Error(`watermark detector failed: ${error}`))
-      else task.resolve(marks)
+      else task.resolve({ marks, ms })
       dispatch()
     })
     worker.on('error', (e) => {
@@ -44,7 +44,7 @@ function start() {
   })
 }
 
-/** Runs `detectChromaText` on a worker. `pixels` is an RGBA Buffer; its bytes are copied, so the caller keeps using the original. */
+/** Runs `detectChromaText` on a worker; resolves to { marks, ms } (ms = pure compute time). `pixels` is an RGBA Buffer; its bytes are copied, so the caller keeps using the original. */
 export function detectInWorker(pixels, width, height) {
   if (!workers) start()
   const copy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)

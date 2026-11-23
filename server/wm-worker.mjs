@@ -4,8 +4,9 @@ import { detectChromaText } from './vendor/wm.mjs'
 
 parentPort.on('message', ({ id, pixels, width, height }) => {
   try {
+    const t0 = performance.now()
     const marks = detectChromaText(new Uint8ClampedArray(pixels), width, height)
-    parentPort.postMessage({ id, marks })
+    parentPort.postMessage({ id, marks, ms: performance.now() - t0 })
   } catch (e) {
     parentPort.postMessage({ id, error: String(e?.message ?? e) })
   }
