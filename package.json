@@ -11,7 +11,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "batch": "node scripts/batch.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
@@ -20,6 +21,7 @@
     "onnxruntime-web": "^1.30.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "sharp": "^0.35.5",
     "tesseract.js": "^7.0.0",
     "zustand": "^5.0.15"
   },
