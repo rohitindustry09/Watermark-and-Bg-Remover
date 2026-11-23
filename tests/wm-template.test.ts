@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 // @ts-expect-error plain ESM modules of the local server, no type declarations
 import * as tpl from '../server/wm-template.mjs'
 // @ts-expect-error plain ESM module of the local server, no type declarations
 import * as wm from '../server/watermark.mjs'
+// @ts-expect-error plain ESM module of the local server, no type declarations
+import { closeWatermarkPool } from '../server/wm-pool.mjs'
+
+afterAll(() => closeWatermarkPool())
 
 let seed = 7
 const rand = (): number => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff)
@@ -130,5 +134,48 @@ describe('growOntoEvidence', () => {
     plane[100] = 1
     wm.growOntoEvidence(plane, width, { E, left: 0, top: 0, w: width, h: height }, 4)
     expect(plane.reduce((a: number, v: number) => a + v, 0)).toBe(1)
+  })
+})
+
+describe('findAll and isWatermark', () => {
+  const samples = [sample(50, 200, 1), sample(120, 180, 1.1), sample(80, 220, 0.9), sample(200, 150, 1), sample(30, 100, 1.05), sample(150, 240, 0.95), sample(220, 60, 1)]
+  const { tpl: learned, stats } = tpl.learnTemplate(samples)
+
+  const withCopies = (copies: { x: number; y: number; gain: number }[]) => {
+    const w = 400
+    const h = 300
+    const E = new Float32Array(w * h)
+    for (const c of copies) {
+      const p = pattern(68, 14)
+      for (let y = 0; y < 14; y++) for (let x = 0; x < 68; x++) E[(c.y + y) * w + c.x + x] += p[y * 68 + x] * c.gain
+    }
+    return { E, w, h }
+  }
+
+  it('records how strongly tinted the real letters are', () => {
+    expect(stats.strength.p10).toBeGreaterThan(0)
+    expect(learned.minEvidence).toBeGreaterThan(0)
+    expect(learned.minEvidence).toBeLessThan(stats.strength.p10)
+  })
+
+  it('finds both a bold copy and a faint copy, best first, instead of only the bold one', () => {
+    const map = withCopies([{ x: 40, y: 30, gain: 1 }, { x: 220, y: 220, gain: 0.5 }])
+    const found = tpl.findAll(map, learned)
+    expect(found.length).toBe(2)
+    expect(Math.abs(found[0].x - 40)).toBeLessThanOrEqual(3)
+    expect(Math.abs(found[1].x - 220)).toBeLessThanOrEqual(3)
+    expect(found.every((f: { strength: number }) => f.strength > 0)).toBe(true)
+  })
+
+  it('rejects a faint pattern-shaped smudge that is too weakly tinted', () => {
+    const map = withCopies([{ x: 100, y: 100, gain: 0.01 }])
+    const found = tpl.findAll(map, learned)
+    expect(found.filter((f: object) => tpl.isWatermark(f, learned)).length).toBe(0)
+  })
+
+  it('accepts a real-strength copy', () => {
+    const map = withCopies([{ x: 100, y: 100, gain: 1 }])
+    const found = tpl.findAll(map, learned)
+    expect(tpl.isWatermark(found[0], learned)).toBe(true)
   })
 })

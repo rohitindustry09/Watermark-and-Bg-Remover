@@ -2,8 +2,8 @@
 // and reconstruct it with LaMa (512 px crops around each mark, on the GPU where the model runs there). For images you own or may edit.
 import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
-import { detectInWorker } from './wm-pool.mjs'
-import { evidenceMap, matchTemplate, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
+import { detectInWorker, findInWorker } from './wm-pool.mjs'
+import { evidenceMap, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
@@ -99,26 +99,53 @@ export function growOntoEvidence(plane, width, ev, reach) {
 export async function findByTemplate(rgba, width, height, tpl) {
   const t0 = performance.now()
   const map = await evidenceMap(rgba, width, height)
-  const match = matchTemplate(map, tpl)
+  // Every copy of the mark, best first (a bold header copy must not hide the faint one on the product). CPU-heavy, so it runs on a worker thread.
+  const { instances } = await findInWorker(map, tpl)
   const detectMs = performance.now() - t0
-  const score = Math.max(0, match.score)
-  const status = score >= tpl.threshold ? 'found' : score >= 0.75 * tpl.threshold ? 'uncertain' : 'none'
-  const empty = { mask: new Uint8Array(width * height), boxes: [], tight: [], marks: 0, score, status, detectMs, match: null }
-  if (status !== 'found') return { ...empty, match: match.score > 0 ? { x: match.x, y: match.y, tw: match.tw, th: match.th } : null }
+  const accepted = instances.filter((i) => isWatermark(i, tpl))
+  const best = accepted[0] ?? instances[0] ?? null
+  const score = Math.max(0, best?.score ?? 0)
+  const status = accepted.length > 0 ? 'found' : best ? 'uncertain' : 'none'
+  const plane = new Uint8Array(width * height)
+  if (accepted.length === 0) return { mask: plane, boxes: [], tight: [], marks: 0, score, status, detectMs, match: best ? { x: best.x, y: best.y, tw: best.tw, th: best.th } : null }
 
-  const { x: x0, y: y0, tw, th, evidence } = refineMatch(rgba, width, height, map, tpl, match) // full-resolution placement
   const up = Math.max(width, height) / WORK_EDGE
-  const shape = resample(tpl.shape, tpl.cw, tpl.ch, tw, th)
-  let plane = new Uint8Array(width * height)
-  for (let y = 0; y < th; y++) {
-    for (let x = 0; x < tw; x++) {
-      if (shape[y * tw + x] >= 0.5 && x0 + x >= 0 && x0 + x < width && y0 + y >= 0 && y0 + y < height) plane[(y0 + y) * width + x0 + x] = 1
+  const tight = []
+  for (const instance of accepted) {
+    // Placement and mask are built at the refinement resolution (see refineMatch), in a small window around the mark, and then scaled up to the
+    // photo's own pixels: widening a mask over a 17-megapixel photo costs far more than the mark itself.
+    const { x: x0, y: y0, tw, th, k, evidence } = refineMatch(rgba, width, height, map, tpl, instance)
+    const ref = up / k
+    const pad = Math.round(ref * 3) + 4
+    const win = evidence ?? { E: null, left: Math.max(0, x0 - pad), top: Math.max(0, y0 - pad), w: tw + 2 * pad, h: th + 2 * pad }
+    const shape = resample(tpl.shape, tpl.cw, tpl.ch, tw, th)
+    let local = new Uint8Array(win.w * win.h)
+    for (let y = 0; y < th; y++) {
+      for (let x = 0; x < tw; x++) {
+        const lx = x0 + x - win.left
+        const ly = y0 + y - win.top
+        if (shape[y * tw + x] >= 0.5 && lx >= 0 && lx < win.w && ly >= 0 && ly < win.h) local[ly * win.w + lx] = 1
+      }
     }
+    local = dilateBinary(local, win.w, win.h, Math.max(2, Math.round((up * 0.75) / k))) // a little margin over the letters' soft edge
+    if (win.E) growOntoEvidence(local, win.w, { E: win.E, left: 0, top: 0, w: win.w, h: win.h }, Math.max(2, Math.round((up * 1.25) / k)))
+    // scale the window mask up to the photo's pixels (each refinement pixel covers k x k of them)
+    const fx0 = Math.floor(win.left * k)
+    const fy0 = Math.floor(win.top * k)
+    const fx1 = Math.min(width, Math.ceil((win.left + win.w) * k))
+    const fy1 = Math.min(height, Math.ceil((win.top + win.h) * k))
+    for (let y = fy0; y < fy1; y++) {
+      const ly = Math.min(win.h - 1, Math.floor(y / k) - win.top)
+      if (ly < 0) continue
+      for (let x = fx0; x < fx1; x++) {
+        const lx = Math.min(win.w - 1, Math.floor(x / k) - win.left)
+        if (lx >= 0 && local[ly * win.w + lx]) plane[y * width + x] = 1
+      }
+    }
+    tight.push([Math.round(x0 * k), Math.round(y0 * k), Math.round((x0 + tw) * k), Math.round((y0 + th) * k)])
   }
-  plane = dilateBinary(plane, width, height, Math.max(2, Math.round(up * 0.75))) // a little margin over the letters' soft edge
-  if (evidence) growOntoEvidence(plane, width, evidence, Math.round(up * 1.25))
-  const box = [x0, y0, x0 + tw, y0 + th]
-  return { mask: plane, boxes: [box.map((v, i) => v + (i < 2 ? -8 : 8))], tight: [box], marks: 1, score, status, detectMs, match: { x: match.x, y: match.y, tw: match.tw, th: match.th } }
+  const boxes = tight.map((box) => box.map((v, i) => v + (i < 2 ? -8 : 8)))
+  return { mask: plane, boxes, tight, marks: accepted.length, score, status, detectMs, match: { x: accepted[0].x, y: accepted[0].y, tw: accepted[0].tw, th: accepted[0].th } }
 }
 
 /** Square crop window of at least LAMA_SIZE px (the native resolution, so strokes are not blurred), centred on the box and kept inside the image. */

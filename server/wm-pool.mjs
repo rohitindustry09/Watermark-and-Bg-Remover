@@ -1,4 +1,4 @@
-// A small pool of worker threads for watermark detection. Tasks queue when every worker is busy; the pool is created on first use.
+// A small pool of worker threads for watermark work. Tasks queue when every worker is busy; the pool is created on first use.
 import os from 'node:os'
 import { Worker } from 'node:worker_threads'
 
@@ -20,7 +20,7 @@ function dispatch() {
     const worker = idle.pop()
     const task = queue.shift()
     pending.set(task.id, { ...task, worker })
-    worker.postMessage({ id: task.id, pixels: task.pixels, width: task.width, height: task.height }, [task.pixels])
+    worker.postMessage({ id: task.id, ...task.message }, task.transfer)
   }
 }
 
@@ -28,12 +28,12 @@ function start() {
   workers = Array.from({ length: poolSize() }, () => {
     const worker = new Worker(WORKER_FILE)
     worker.unref() // an idle pool never keeps the process alive
-    worker.on('message', ({ id, marks, ms, error }) => {
+    worker.on('message', ({ id, result, error }) => {
       const task = pending.get(id)
       pending.delete(id)
       idle.push(worker)
-      if (error) task.reject(new Error(`watermark detector failed: ${error}`))
-      else task.resolve({ marks, ms })
+      if (error) task.reject(new Error(`watermark worker failed: ${error}`))
+      else task.resolve(result)
       dispatch()
     })
     worker.on('error', (e) => {
@@ -44,14 +44,24 @@ function start() {
   })
 }
 
-/** Runs `detectChromaText` on a worker; resolves to { marks, ms } (ms = pure compute time). `pixels` is an RGBA Buffer; its bytes are copied, so the caller keeps using the original. */
-export function detectInWorker(pixels, width, height) {
+function run(message, transfer) {
   if (!workers) start()
-  const copy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
   return new Promise((resolve, reject) => {
-    queue.push({ id: ++seq, pixels: copy, width, height, resolve, reject })
+    queue.push({ id: ++seq, message, transfer, resolve, reject })
     dispatch()
   })
+}
+
+/** Runs `detectChromaText` on a worker; resolves to { marks, ms } (ms = pure compute time). `pixels` is an RGBA Buffer; its bytes are copied. */
+export function detectInWorker(pixels, width, height) {
+  const copy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
+  return run({ task: 'detect', pixels: copy, width, height }, [copy])
+}
+
+/** Finds every instance of the learned pattern `tpl` in an evidence map on a worker; resolves to { instances, ms }. The map is copied. */
+export function findInWorker(map, tpl) {
+  const E = new Float32Array(map.E)
+  return run({ task: 'find', E, w: map.w, h: map.h, tpl }, [E.buffer])
 }
 
 export async function closeWatermarkPool() {

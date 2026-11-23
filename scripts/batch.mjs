@@ -218,7 +218,7 @@ async function main() {
       timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
       const box = found.tight?.[0]
-      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', score: found.score.toFixed(2), x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
+      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', copies: found.marks, score: found.score.toFixed(2), x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
       if (found.marks === 0) return
       wmStats.withMark++
       if (opts['debug-masks']) {

@@ -183,30 +183,46 @@ export function matchTemplate(map, tpl, { region, scales } = {}) {
 }
 
 /**
- * Re-places a match found on the 400 px map using the full-resolution pixels. One map pixel is several real pixels on a large photo, so the coarse
- * position can be off by a few of them, enough to leave the letters' lower edge uncovered. Searches a small window around the match, at a few sizes,
- * on a full-resolution evidence crop. Returns { x, y, tw, th } in full-resolution pixels.
+ * Re-places a match found on the 400 px map using finer pixels. One map pixel is several real pixels on a large photo, so the coarse position can be
+ * off by a few of them, enough to leave the letters' lower edge uncovered. Works at up to REFINE_SCALE pixels per map pixel (a 1600 px photo), however big
+ * the photo is: the cost grows with the fourth power of the resolution, and the mask is widened afterwards anyway. Everything returned (x, y, tw, th and
+ * the evidence crop) is in those refinement pixels; `k` is how many real pixels one of them covers (1 up to a 1600 px photo, more above that).
  */
+const REFINE_SCALE = 4
+
 export function refineMatch(rgba, width, height, map, tpl, match) {
   const up = Math.max(width, height) / WORK_EDGE
-  const gx0 = Math.max(0, Math.floor((match.x - 3) * up))
-  const gy0 = Math.max(0, Math.floor((match.y - 3) * up))
-  const gx1 = Math.min(width, Math.ceil((match.x + match.tw + 3) * up))
-  const gy1 = Math.min(height, Math.ceil((match.y + match.th + 3) * up))
+  const ref = Math.min(up, REFINE_SCALE)
+  const k = up / ref
+  const samples = Math.max(1, Math.round(k))
+  const rw = Math.max(1, Math.round(width / k))
+  const rh = Math.max(1, Math.round(height / k))
+  const gx0 = Math.max(0, Math.floor((match.x - 3) * ref))
+  const gy0 = Math.max(0, Math.floor((match.y - 3) * ref))
+  const gx1 = Math.min(rw, Math.ceil((match.x + match.tw + 3) * ref))
+  const gy1 = Math.min(rh, Math.ceil((match.y + match.th + 3) * ref))
   const cw = gx1 - gx0
   const ch = gy1 - gy0
   const E = new Float32Array(cw * ch)
   for (let y = 0; y < ch; y++) {
-    const fy = Math.min(map.h - 1.001, Math.max(0, (gy0 + y + 0.5) / up - 0.5))
+    const fy = Math.min(map.h - 1.001, Math.max(0, (gy0 + y + 0.5) / ref - 0.5))
     const my = Math.floor(fy)
     const ty = fy - my
     for (let x = 0; x < cw; x++) {
-      const i = ((gy0 + y) * width + gx0 + x) * 4
-      const r = LINEAR[rgba[i]]
-      const g = LINEAR[rgba[i + 1]]
-      const b = LINEAR[rgba[i + 2]]
-      const a = 500 * (lab((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047) - lab(0.2126 * r + 0.7152 * g + 0.0722 * b))
-      const fx = Math.min(map.w - 1.001, Math.max(0, (gx0 + x + 0.5) / up - 0.5))
+      let a = 0
+      for (let sy = 0; sy < samples; sy++) {
+        for (let sx = 0; sx < samples; sx++) {
+          const px = Math.min(width - 1, Math.floor((gx0 + x + (sx + 0.5) / samples) * k))
+          const py = Math.min(height - 1, Math.floor((gy0 + y + (sy + 0.5) / samples) * k))
+          const i = (py * width + px) * 4
+          const r = LINEAR[rgba[i]]
+          const g = LINEAR[rgba[i + 1]]
+          const b = LINEAR[rgba[i + 2]]
+          a += 500 * (lab((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047) - lab(0.2126 * r + 0.7152 * g + 0.0722 * b))
+        }
+      }
+      a /= samples * samples
+      const fx = Math.min(map.w - 1.001, Math.max(0, (gx0 + x + 0.5) / ref - 0.5))
       const mx = Math.floor(fx)
       const tx = fx - mx
       const bgv = (map.bg[my * map.w + mx] * (1 - tx) + map.bg[my * map.w + mx + 1] * tx) * (1 - ty) + (map.bg[(my + 1) * map.w + mx] * (1 - tx) + map.bg[(my + 1) * map.w + mx + 1] * tx) * ty
@@ -215,23 +231,68 @@ export function refineMatch(rgba, width, height, map, tpl, match) {
   }
   const cropMap = { E, w: cw, h: ch }
   const I = integrals(E, cw, ch)
-  const ex = match.x * up - gx0
-  const ey = match.y * up - gy0
-  const R = Math.ceil(up * 2.5)
+  const ex = match.x * ref - gx0
+  const ey = match.y * ref - gy0
+  const R = Math.ceil(ref * 2.5)
   let best = { score: -2 }
   for (const f of [0.96, 0.98, 1, 1.02, 1.04]) {
-    const tw = Math.round(match.tw * up * f)
+    const tw = Math.round(match.tw * ref * f)
     const th = Math.max(3, Math.round((tw * tpl.ch) / tpl.cw))
     if (tw >= cw || th >= ch) continue
     const t = { ...standardise(resample(tpl.data, tpl.cw, tpl.ch, tw, th)), tw, th }
     const m = bestIn(cropMap, I, t, tw, th, Math.round(ex - R), Math.round(ex + R), Math.round(ey - R), Math.round(ey + R), 2)
     if (m.score > best.score) best = { ...m, tw, th, t }
   }
-  if (best.score < -1) return { x: Math.round(match.x * up), y: Math.round(match.y * up), tw: Math.round(match.tw * up), th: Math.round(match.th * up), evidence: null }
+  if (best.score < -1) return { x: Math.round(match.x * ref), y: Math.round(match.y * ref), tw: Math.round(match.tw * ref), th: Math.round(match.th * ref), k, evidence: null }
   const fine = bestIn(cropMap, I, best.t, best.tw, best.th, best.x - 1, best.x + 1, best.y - 1, best.y + 1)
-  // The full-resolution evidence crop is returned too, so the mask can be grown onto leftover tinted pixels (see growOntoEvidence in watermark.mjs).
-  return { x: gx0 + fine.x, y: gy0 + fine.y, tw: best.tw, th: best.th, evidence: { E, left: gx0, top: gy0, w: cw, h: ch } }
+  // The evidence crop is returned too, so the mask can be grown onto leftover tinted pixels (see growOntoEvidence in watermark.mjs).
+  return { x: gx0 + fine.x, y: gy0 + fine.y, tw: best.tw, th: best.th, k, evidence: { E, left: gx0, top: gy0, w: cw, h: ch } }
 }
+
+/** Zeroes a generous area around a match, so a repeat search finds a different instance and not the leftover edge of this one. */
+function blankAround(E, w, h, m) {
+  const padX = Math.round(m.tw * 0.3)
+  const padY = Math.round(m.th * 1.5)
+  for (let y = Math.max(0, m.y - padY); y < Math.min(h, m.y + m.th + padY); y++) for (let x = Math.max(0, m.x - padX); x < Math.min(w, m.x + m.tw + padX); x++) E[y * w + x] = 0
+}
+
+/**
+ * How strongly tinted the letters are at a match: the mean evidence under the learned letter shape. Correlation ignores amplitude, so faint noise on a
+ * plain backdrop can correlate as well as real lettering; real lettering is also clearly tinted, noise is not.
+ */
+export function meanEvidence(map, tpl, m) {
+  const shape = shapeAt(tpl, m.tw, m.th)
+  let sum = 0
+  let n = 0
+  for (let y = 0; y < m.th; y++) {
+    for (let x = 0; x < m.tw; x++) {
+      if (shape[y * m.tw + x]) {
+        sum += map.E[(m.y + y) * map.w + m.x + x]
+        n++
+      }
+    }
+  }
+  return n ? sum / n : 0
+}
+
+/**
+ * Every instance of the pattern in the map, best first, up to \`max\`: after each find its surroundings are blanked and the search repeats. A photo can
+ * hold the mark twice (the faint one on the product and a bold copy in a header), and the bold one must not hide the faint one.
+ */
+export function findAll(map, tpl, { max = 3 } = {}) {
+  const E = new Float32Array(map.E)
+  const out = []
+  for (let k = 0; k < max; k++) {
+    const m = matchTemplate({ E, w: map.w, h: map.h }, tpl)
+    if (!(m.score >= 0.75 * tpl.threshold)) break
+    out.push({ ...m, strength: meanEvidence(map, tpl, m) }) // strength is measured on the real map, not the blanked copy
+    blankAround(E, map.w, map.h, m)
+  }
+  return out
+}
+
+/** An instance counts as the watermark when it correlates well enough and its letters are tinted strongly enough. */
+export const isWatermark = (instance, tpl) => instance.score >= tpl.threshold && instance.strength >= tpl.minEvidence
 
 /** The learned letter shape as a 0/1 plane at the matched size (map pixels), thresholded so the letters are covered with a little margin. */
 export function shapeAt(tpl, tw, th) {
@@ -325,31 +386,45 @@ export function learnTemplate(samples) {
   const cut = sorted[Math.floor(sorted.length * 0.6)] // the top 40% of the averaged shape: the letters plus a little margin
   const shape = dropSpecks(Float32Array.from(data, (v) => (v >= cut ? 1 : 0)), cw, ch)
   const widths = places.map((p) => p.tw)
-  const scales = Array.from({ length: 7 }, (_, i) => ((quantile(widths, 0.03) * 0.92 + ((quantile(widths, 0.97) * 1.08 - quantile(widths, 0.03) * 0.92) * i) / 6) / refWidth))
-  const tpl = { cw, ch, refWidth, data, shape, scales, threshold: 0.5 }
+  // Sizes to search: the middle 90% of the learned widths with some margin (robust to a few odd samples), never below 60% of the typical width.
+  const lowW = Math.max(quantile(widths, 0.05) * 0.88, 0.6 * refWidth)
+  const highW = quantile(widths, 0.95) * 1.12
+  const scales = Array.from({ length: 7 }, (_, i) => (lowW + ((highW - lowW) * i) / 6) / refWidth)
+  const tpl = { cw, ch, refWidth, data, shape, scales, threshold: 0.5, minEvidence: 0 }
 
   // How well real watermarks and everything else score: the first from where the pattern sits, the second from a search with that spot blanked out.
+  // A second real copy of the mark (a header) can also turn up there, so the typical (median) score of the rest sets the noise floor, not its top.
   const real = []
   const other = []
-  samples.forEach((s, i) => {
-    const p = places[i]
-    const m = matchTemplate({ E: s.E, w: s.w, h: s.h }, tpl)
+  const strength = []
+  samples.forEach((s) => {
+    const map = { E: s.E, w: s.w, h: s.h }
+    const m = matchTemplate(map, tpl)
     real.push(m.score)
+    strength.push(meanEvidence(map, tpl, m))
     const blanked = new Float32Array(s.E)
-    for (let y = Math.max(0, Math.round(p.y) - 6); y < Math.min(s.h, Math.round(p.y + p.th) + 6); y++) {
-      for (let x = Math.max(0, Math.round(p.x) - 6); x < Math.min(s.w, Math.round(p.x + p.tw) + 6); x++) blanked[y * s.w + x] = 0
-    }
+    blankAround(blanked, s.w, s.h, m)
     other.push(Math.max(0, matchTemplate({ E: blanked, w: s.w, h: s.h }, tpl).score))
   })
   const lowReal = quantile(real, 0.1)
-  const highOther = quantile(other, 0.9)
-  tpl.threshold = Math.min(0.75, Math.max(0.3, (lowReal + highOther) / 2))
-  return { tpl, scores: real, stats: { samples: samples.length, real: { min: Math.min(...real), p10: lowReal, median: median(real) }, other: { median: median(other), p90: highOther, max: Math.max(...other) }, threshold: tpl.threshold } }
+  tpl.threshold = Math.min(0.75, Math.max(0.5, (lowReal + median(other)) / 2))
+  tpl.minEvidence = 0.5 * quantile(strength, 0.1) // half the weakest real tint: keeps faint noise out without rejecting faint real marks
+  return {
+    tpl,
+    scores: real,
+    stats: {
+      samples: samples.length,
+      real: { min: Math.min(...real), p10: lowReal, median: median(real) },
+      other: { median: median(other), p90: quantile(other, 0.9), max: Math.max(...other) },
+      strength: { p10: quantile(strength, 0.1), median: median(strength), minEvidence: tpl.minEvidence },
+      threshold: tpl.threshold,
+    },
+  }
 }
 
 export function serialiseTemplate(tpl) {
   const b64 = (f) => Buffer.from(f.buffer, f.byteOffset, f.byteLength).toString('base64')
-  return JSON.stringify({ version: 1, workEdge: WORK_EDGE, cw: tpl.cw, ch: tpl.ch, refWidth: tpl.refWidth, scales: tpl.scales, threshold: tpl.threshold, data: b64(tpl.data), shape: b64(tpl.shape) })
+  return JSON.stringify({ version: 1, workEdge: WORK_EDGE, cw: tpl.cw, ch: tpl.ch, refWidth: tpl.refWidth, scales: tpl.scales, threshold: tpl.threshold, minEvidence: tpl.minEvidence ?? 0, data: b64(tpl.data), shape: b64(tpl.shape) })
 }
 
 export function parseTemplate(text) {
@@ -359,5 +434,5 @@ export function parseTemplate(text) {
     const buf = Buffer.from(s, 'base64')
     return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
   }
-  return { cw: j.cw, ch: j.ch, refWidth: j.refWidth, scales: j.scales, threshold: j.threshold, data: f32(j.data), shape: f32(j.shape) }
+  return { cw: j.cw, ch: j.ch, refWidth: j.refWidth, scales: j.scales, threshold: j.threshold, minEvidence: j.minEvidence ?? 0, data: f32(j.data), shape: f32(j.shape) }
 }
