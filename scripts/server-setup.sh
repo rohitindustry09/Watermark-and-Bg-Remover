@@ -19,8 +19,13 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 say "System tools"
 # A duplicate NVIDIA package source (left by an earlier run of this script) makes apt refuse to read its sources; remove it and try again.
 if ! sudo apt-get update -qq >/dev/null 2>&1; then
-  sudo dpkg -r cuda-keyring >/dev/null 2>&1 || true
-  sudo apt-get update -qq
+  # "dpkg -P" (purge) and not "-r": removing keeps the package's config file, which is the conflicting source line.
+  sudo dpkg -P cuda-keyring >/dev/null 2>&1 || true
+  if ! sudo apt-get update -qq; then
+    echo "apt still cannot read its package sources. The NVIDIA entries are:"
+    grep -rn "developer.download.nvidia.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
+    exit 1
+  fi
 fi
 sudo apt-get install -y -qq git curl wget zip unzip build-essential >/dev/null
 echo "git, curl, zip and unzip are installed."
