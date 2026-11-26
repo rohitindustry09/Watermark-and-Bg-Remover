@@ -17,7 +17,11 @@ fi
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
 say "System tools"
-sudo apt-get update -qq
+# A duplicate NVIDIA package source (left by an earlier run of this script) makes apt refuse to read its sources; remove it and try again.
+if ! sudo apt-get update -qq >/dev/null 2>&1; then
+  sudo dpkg -r cuda-keyring >/dev/null 2>&1 || true
+  sudo apt-get update -qq
+fi
 sudo apt-get install -y -qq git curl wget zip unzip build-essential >/dev/null
 echo "git, curl, zip and unzip are installed."
 
@@ -45,18 +49,30 @@ fi
 echo "node $(node -v), npm $(npm -v)"
 
 say "CUDA 13 runtime and cuDNN 9 (needed for the GPU)"
-if ldconfig -p | grep -q 'libcublasLt.so.13' && ldconfig -p | grep -q 'libcudnn.so.9'; then
+# The checks capture the command's output first and search that: with "set -o pipefail", "ldconfig -p | grep -q x" reports failure even when x is found
+# (grep -q exits at the first match and the left side gets SIGPIPE).
+libs_present() {
+  local libs
+  libs="$(ldconfig -p 2>/dev/null || true)"
+  grep -q 'libcublasLt.so.13' <<<"$libs" && grep -q 'libcudnn.so.9' <<<"$libs"
+}
+cuda_visible() {
+  local policy
+  policy="$(apt-cache policy cuda-libraries-13-0 2>/dev/null || true)"
+  grep -q 'Candidate: [0-9]' <<<"$policy"
+}
+if libs_present; then
   echo "Already installed."
 else
-  # Add NVIDIA's package source only if apt cannot already see the CUDA packages (some images have it set up, and adding it twice makes apt complain).
-  if ! apt-cache policy cuda-libraries-13-0 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+  # Add NVIDIA's package source only if apt cannot already see the CUDA packages (the Hostinger image has it set up, and adding it twice makes apt fail).
+  if ! cuda_visible; then
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
     sudo dpkg -i /tmp/cuda-keyring.deb
     sudo apt-get update -qq
   fi
   sudo apt-get install -y cuda-libraries-13-0 libcudnn9-cuda-13
   sudo ldconfig
-  if ldconfig -p | grep -q 'libcublasLt.so.13' && ldconfig -p | grep -q 'libcudnn.so.9'; then
+  if libs_present; then
     echo "Installed."
   else
     echo "The CUDA 13 runtime or cuDNN 9 is still missing after the install; the GPU cannot be used. Stopping."
