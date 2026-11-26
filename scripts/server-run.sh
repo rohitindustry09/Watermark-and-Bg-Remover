@@ -187,6 +187,28 @@ case "${1:-help}" in
     echo
     echo "Finished in $(((SECONDS - STARTED) / 60)) min. Download ${OUT%/}.zip from your PC (scp), then stop or destroy the server so it stops billing."
     ;;
+  redo)
+    need_dir "${2:-}" redo
+    need_zip
+    OUT="${3:-$HOME/out}"
+    [ -s "$OUT/watermark-report.csv" ] || { echo "No $OUT/watermark-report.csv: run 'full' first."; exit 2; }
+    start_server
+    ensure_pattern "$2"
+    rm -rf "$HOME/redo-in" "$HOME/redo-out" "$HOME/redo-debug" "$HOME/redo-results.zip"
+    node scripts/redo-list.mjs "$OUT/watermark-report.csv" "$2" "$HOME/redo-in"
+    [ -n "$(ls -A "$HOME/redo-in" 2>/dev/null)" ] || { echo "Nothing to redo."; exit 0; }
+    # a looser copy of the pattern: the images in the report had a best match that was too weak to trust, so the best match is accepted here and the mask
+    # overlays (redo-debug) are there to check by eye. The finished results in $OUT are not touched.
+    node scripts/redo-list.mjs --relax "$PATTERN" "$HOME/wm-pattern-relaxed.json" "${REDO_THRESHOLD:-0.8}" "${REDO_STRENGTH:-0.35}"
+    SAVED_PATTERN="$PATTERN"
+    PATTERN="$HOME/wm-pattern-relaxed.json"
+    batch "$HOME/redo-in" "$HOME/redo-out" --wm-double-check --debug-masks "$HOME/redo-debug" || echo "(some images failed: see the lines above.)"
+    PATTERN="$SAVED_PATTERN"
+    (cd "$HOME" && zip -qr redo-results.zip redo-out redo-debug)
+    echo
+    echo "Redone images: ~/redo-out (same folder layout as $OUT); the places that were cleaned: ~/redo-debug (red = removed area)."
+    echo "Download ~/redo-results.zip and check them. To use them in the finished set:  cp -r ~/redo-out/. $OUT/   then rebuild the zip:  (cd $OUT && rm -f ../out.zip && zip -0qr ../out.zip .)"
+    ;;
   help | *)
     cat <<'EOF'
 Usage: bash scripts/server-run.sh <command> [folder]
@@ -199,6 +221,8 @@ Usage: bash scripts/server-run.sh <command> [folder]
   test   <folder>  run a 15-image test: learns the pattern if needed, writes ~/test-results.zip to download and check
   full   <folder> [out]   run every image in <folder>; results in [out] (default ~/out) and a zip next to it.
                           Finished files are skipped, so after an interruption run the same command again.
+  redo   <folder> [out]   run again only the images the report lists as uncertain, with a looser matcher; results in ~/redo-out (not mixed into [out]) and
+                          ~/redo-results.zip with mask overlays to check by eye
 
 Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (parts side by side: one per 4 CPU cores, at least 2),
 QUALITY (90), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (1), SAMPLES (120), TEST_COUNT (15).
