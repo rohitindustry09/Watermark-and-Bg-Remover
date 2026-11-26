@@ -112,6 +112,45 @@ export async function findInstances(rgba, width, height, tpl) {
   return { map, instances }
 }
 
+/**
+ * The watermark reads "Dharma Statues", but its last letter is orange while the rest is teal, so the learned pattern (built from the teal tint) ends after
+ * "Statue" and the orange "s" would be left behind. The tail is that last letter: as wide as the pattern's last letter ("e") and one column further right,
+ * so its mask is the last TAIL_COLS columns of the pattern's shape, repeated after the end. Added in the photo's own pixels; returns how far it reaches.
+ */
+export const TAIL_COLS = 10
+export const TAIL_GAP_COLS = 1
+export function addTail(plane, width, height, tpl, left, top, boxW, boxH, margin) {
+  const unitX = boxW / tpl.cw
+  const unitY = boxH / tpl.ch
+  const tailW = Math.ceil((TAIL_GAP_COLS + TAIL_COLS) * unitX)
+  const x0 = Math.round(left + boxW)
+  const wx = tailW + 2 * margin
+  const wy = Math.ceil(boxH) + 2 * margin
+  const wl = x0 - margin
+  const wt = Math.round(top) - margin
+  const local = new Uint8Array(wx * wy)
+  for (let y = 0; y < wy; y++) {
+    const ty = Math.floor((y - margin) / unitY)
+    if (ty < 0 || ty >= tpl.ch) continue
+    for (let x = margin; x < margin + tailW; x++) {
+      const col = Math.floor((x - margin) / unitX) - TAIL_GAP_COLS // 0 = first column of the tail
+      if (col < 0) continue
+      const src = tpl.cw - TAIL_COLS + Math.min(col, TAIL_COLS - 1)
+      if (tpl.shape[ty * tpl.cw + src] >= 0.5) local[y * wx + x] = 1
+    }
+  }
+  const grown = dilateBinary(local, wx, wy, margin)
+  for (let y = 0; y < wy; y++) {
+    const py = wt + y
+    if (py < 0 || py >= height) continue
+    for (let x = 0; x < wx; x++) {
+      const px = wl + x
+      if (px >= 0 && px < width && grown[y * wx + x]) plane[py * width + px] = 1
+    }
+  }
+  return tailW + margin
+}
+
 export async function findByTemplate(rgba, width, height, tpl) {
   const t0 = performance.now()
   const { map, instances } = await findInstances(rgba, width, height, tpl)
@@ -156,7 +195,9 @@ export async function findByTemplate(rgba, width, height, tpl) {
         if (lx >= 0 && local[ly * win.w + lx]) plane[y * width + x] = 1
       }
     }
-    tight.push([Math.round(x0 * k), Math.round(y0 * k), Math.round((x0 + tw) * k), Math.round((y0 + th) * k)])
+    const margin = Math.max(2, Math.round(up * 0.75))
+    const reach = addTail(plane, width, height, tpl, x0 * k, y0 * k, tw * k, th * k, margin)
+    tight.push([Math.round(x0 * k), Math.round(y0 * k), Math.round((x0 + tw) * k + reach), Math.round((y0 + th) * k)])
   }
   const boxes = tight.map((box) => box.map((v, i) => v + (i < 2 ? -8 : 8)))
   return { mask: plane, boxes, tight, marks: accepted.length, score, status, detectMs, match: { x: accepted[0].x, y: accepted[0].y, tw: accepted[0].tw, th: accepted[0].th } }

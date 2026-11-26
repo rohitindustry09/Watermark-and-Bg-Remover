@@ -206,6 +206,7 @@ case "${1:-help}" in
     PATTERN="$SAVED_PATTERN"
     (cd "$HOME" && zip -qr redo-results.zip redo-out redo-debug)
     echo
+    echo "CAUTION: a looser matcher can also accept a wrong spot and fill a patch of the statue. Check every image against its overlay before using any of them."
     echo "Redone images: ~/redo-out (same folder layout as $OUT); the places that were cleaned: ~/redo-debug (red = removed area)."
     echo "Download ~/redo-results.zip and check them. To use them in the finished set:  cp -r ~/redo-out/. $OUT/   then rebuild the zip:  (cd $OUT && rm -f ../out.zip && zip -0qr ../out.zip .)"
     ;;
