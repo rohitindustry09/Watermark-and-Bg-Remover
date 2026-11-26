@@ -346,7 +346,7 @@ async function main() {
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) {
     const by = (s) => wmRows.filter((r) => r.status === s).length
-    console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
+    if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
     if (wmRows.length) {
       fs.mkdirSync(outputDir, { recursive: true })
       fs.writeFileSync(path.join(outputDir, shard.count > 1 ? `watermark-report-part${shard.index}of${shard.count}.csv` : 'watermark-report.csv'), csvRows(wmRows))
