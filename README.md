@@ -27,13 +27,25 @@ npm run app        # inference server on 127.0.0.1:8787 + the web page on 127.0.
 - **Environment:** `INFERENCE_PORT` (default 8787), `MODEL_DIR`, `MODEL_HOST`, `ORT_PROVIDERS`; `VITE_INFERENCE_URL` points the page at another address.
 - Not yet moved to the server: AI upscaling (Enhance) and OCR still run in the browser.
 
+## GPU server quick start (Ubuntu 24.04 + NVIDIA)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rohitindustry09/Watermark-and-Bg-Remover/main/scripts/server-setup.sh | bash   # once; safe to repeat
+bash ~/Watermark-and-Bg-Remover/scripts/server-run.sh test ~/Brass      # 15-image test -> ~/test-results.zip to download and check
+bash ~/Watermark-and-Bg-Remover/scripts/server-run.sh full ~/Brass      # everything -> ~/out and ~/out.zip
+```
+
+`server-setup.sh` installs Node 22, the CUDA 13 runtime and cuDNN 9 that the GPU build of onnxruntime needs, and the project. `server-run.sh` starts the
+inference server in the background, learns the watermark pattern from the folder if `~/wm-pattern.json` does not exist, and runs the batch with the
+full BiRefNet, WebP output and watermark removal. `bash scripts/server-run.sh help` lists the commands and the settings (`MODEL`, `JOBS`, `QUALITY`).
+
 ## Bulk background removal from the command line (no browser)
 
 For thousands of images, run the whole pipeline on the machine with the GPU instead of through a browser tab. Start the inference server
 (`npm run server`, or `npm run app`), then in a second terminal:
 
 ```bash
-npm run batch -- <inputDir> <outputDir> [--model birefnet-lite|rmbg-1.4|modnet] [--format png|webp|avif|jpeg] [--quality 90] [--zip out.zip] [--jobs 6]
+npm run batch -- <inputDir> <outputDir> [--model birefnet|birefnet-lite|rmbg-1.4|modnet] [--format png|webp|avif|jpeg] [--quality 90] [--zip out.zip] [--jobs 6] [--no-refine]
 ```
 
 - Folders are searched recursively and the sub-folder layout is kept; re-running skips files that already exist, so an interrupted run resumes.
@@ -50,7 +62,8 @@ npm run batch -- <inputDir> <outputDir> [--model birefnet-lite|rmbg-1.4|modnet] 
   0.15 s, the mask follows the letter shapes, and every image gets a status in `watermark-report.csv` in the output folder (`found`, `uncertain`,
   `colour-backup`, `none`). Weak matches fall back to the colour detector; `--wm-double-check` also runs it on images where the pattern found nothing.
   Learn from the original photos, not cutouts (a cutout cuts the watermark off where the background was).
-- The result is the raw model matte at the source resolution; the browser editor's edge refinement is not applied.
+- `--shard 2/4` makes this process take every 4th image (part 2 of 4), so several processes can work on one folder side by side, each with its own main thread, sharing one GPU server. `server-run.sh full` does this for you (`SHARDS=2` by default); each part writes its own `watermark-report-partNofM.csv`, merged into one at the end. At the end of a run the batch says whether its main thread or the CPU was the limit, which tells you whether more parts will help. If a GPU server puts the model on its CPU the batch stops at once (`--allow-cpu` overrides).
+- Edges are refined after the model runs: the soft upscaled matte is steepened and the edge pixels' colour is taken from the solid object next to them, so there is no pale halo on a new background (`--no-refine` turns this off). `--model birefnet` is the full BiRefNet (fp16 490 MB): the most precise on thin parts, and the default of the server scripts.
 - `--jobs` is how many images are in flight; use 2-3 on a PC with little RAM.
 
 ## Installation

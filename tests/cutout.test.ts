@@ -56,3 +56,39 @@ describe('server cutout pipeline', () => {
     expect(data[(24 * 64 + 60) * 4 + 3]).toBe(0) // right side removed
   })
 })
+
+describe('edge refinement', () => {
+  it('steepens the matte edge: clears faint haze, keeps solid areas solid, stays monotonic', () => {
+    const input = Buffer.from([0, 20, 40, 128, 215, 240, 255])
+    const out = Array.from(cutout.shapeMatte(input)) as number[]
+    expect(out[0]).toBe(0)
+    expect(out[1]).toBe(0) // faint haze is cleared
+    expect(out[5]).toBe(255) // nearly solid becomes solid
+    expect(out[6]).toBe(255)
+    expect(Math.abs(out[3] - 128)).toBeLessThanOrEqual(2) // the 50% contour does not move
+    for (let i = 1; i < out.length; i++) expect(out[i]).toBeGreaterThanOrEqual(out[i - 1])
+  })
+
+  it('replaces the backdrop tint on edge pixels with the colour of the solid object next to them', async () => {
+    const w = 24
+    const h = 8
+    const rgba = Buffer.alloc(w * h * 4)
+    const matte = Buffer.alloc(w * h)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        if (x < 10) rgba.set([200, 10, 10, 255], i * 4) // solid red object
+        else if (x < 12) rgba.set([230, 140, 140, 255], i * 4) // edge pixels: red blended with a white backdrop
+        else rgba.set([255, 255, 255, 255], i * 4) // backdrop
+        matte[i] = x < 10 ? 255 : x < 12 ? 128 : 0
+      }
+    }
+    await cutout.decontaminate(rgba, matte, w, h)
+    const px = (x: number, y: number) => Array.from(rgba.subarray((y * w + x) * 4, (y * w + x) * 4 + 3)) as number[]
+    expect(px(3, 4)).toEqual([200, 10, 10]) // solid pixels are untouched
+    const edge = px(10, 4)
+    expect(edge[0]).toBeGreaterThan(170) // now red again,
+    expect(edge[1]).toBeLessThan(60) // not the pale pink blend
+    expect(edge[2]).toBeLessThan(60)
+  })
+})

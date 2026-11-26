@@ -4,11 +4,13 @@
 // segments them; each result is written as a PNG with transparency. Re-running skips files that already exist, so an interrupted run resumes.
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
 import { findByTemplate, findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
+import { parseShard, shardItems } from '../server/shard.mjs'
 import { parseTemplate } from '../server/wm-template.mjs'
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif|tiff?|bmp|gif)$/i
@@ -18,7 +20,7 @@ function parseArgs(argv) {
   const opts = { model: 'birefnet-lite', jobs: 6, precision: 'fp16', format: 'png', quality: 90, server: process.env.INFERENCE_URL ?? 'http://127.0.0.1:8787' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--remove-watermarks' || a === '--wm-double-check') opts[a.slice(2)] = true
+    if (a === '--remove-watermarks' || a === '--wm-double-check' || a === '--no-refine' || a === '--allow-cpu') opts[a.slice(2)] = true
     else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
     else positional.push(a)
   }
@@ -147,8 +149,19 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
+    process.exit(2)
+  }
+  let shard
+  try {
+    shard = parseShard(opts.shard)
+  } catch (e) {
+    console.error(e.message)
+    process.exit(2)
+  }
+  if (shard.count > 1 && opts.zip) {
+    console.error('--zip cannot be combined with --shard: zip the output folder once, after every shard has finished.')
     process.exit(2)
   }
   if (opts.zip && path.resolve(opts.zip).startsWith(path.resolve(outputDir) + path.sep)) {
@@ -169,8 +182,12 @@ async function main() {
 
   const plan = planOutputs([...walk(inputDir)].sort(), inputDir, outputDir, format.ext)
   const todo = plan.filter((p) => !fs.existsSync(p.dest))
-  console.log(`${plan.length} images found, ${plan.length - todo.length} already done, ${todo.length} to process (model ${opts.model}, ${opts.jobs} in flight).`)
-  if (todo.length === 0) {
+  // This process's share when several run side by side. The split is made on the whole sorted list (not on what is still to do), so parts that start
+  // a few seconds apart still agree on who owns which file, whatever has been finished in between.
+  const work = shardItems(plan, shard.index, shard.count).filter((p) => !fs.existsSync(p.dest))
+  const shardNote = shard.count > 1 ? ` Part ${shard.index} of ${shard.count}: ${work.length} of them.` : ''
+  console.log(`${plan.length} images found, ${plan.length - todo.length} already done, ${todo.length} to process (model ${opts.model}, ${opts.jobs} in flight).${shardNote}`)
+  if (work.length === 0) {
     if (opts.zip) zipFolder(outputDir, opts.zip)
     return
   }
@@ -178,6 +195,13 @@ async function main() {
   const session = await openSession(opts.server, spec, opts.precision)
   const state = { sid: session.sid, inputName: session.inputNames[0], precision: session.precision }
   console.log(`Model ready on ${session.provider} (${session.precision}).`)
+  // A GPU server that put the model on its CPU would take hours (and bill for them): stop at once instead of crawling through the whole folder.
+  if (health.gpu && session.provider === 'cpu' && !opts['allow-cpu']) {
+    console.error(`\nThe model could not run on the GPU (${health.gpu}) and fell back to the CPU, which is far too slow for a big folder. Stopping.`)
+    console.error('See the server log (~/server.log) for the reason, or add --allow-cpu to run on the CPU anyway.')
+    await fetch(`${opts.server}/api/release?sid=${session.sid}`, { method: 'POST' }).catch(() => undefined)
+    process.exit(3)
+  }
   const run = makeRun(opts.server, spec, state)
   const infer = async (data, dims) => {
     const outputs = await run([{ name: state.inputName, dims, data }])
@@ -238,16 +262,16 @@ async function main() {
   const started = performance.now()
   const report = () => {
     const secs = (performance.now() - started) / 1000
-    process.stdout.write(`\r${done + failures.length}/${todo.length} done, ${failures.length} failed, ${(done / Math.max(secs, 0.001)).toFixed(1)} img/s   `)
+    process.stdout.write(`\r${done + failures.length}/${work.length} done, ${failures.length} failed, ${(done / Math.max(secs, 0.001)).toFixed(1)} img/s   `)
   }
   const ticker = setInterval(report, 1000)
 
   const worker = async () => {
-    while (next < todo.length) {
-      const { src, dest } = todo[next++]
+    while (next < work.length) {
+      const { src, dest } = work[next++]
       try {
         const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
-        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings })
+        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings, refine: !opts['no-refine'] })
         fs.mkdirSync(path.dirname(dest), { recursive: true })
         fs.writeFileSync(`${dest}.part`, png)
         fs.renameSync(`${dest}.part`, dest) // never leaves a half-written file that a re-run would skip
@@ -257,7 +281,7 @@ async function main() {
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(opts.jobs, todo.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(opts.jobs, work.length) }, worker))
   clearInterval(ticker)
   report()
   console.log(`\nFinished ${done} images in ${((performance.now() - started) / 1000).toFixed(1)} s -> ${path.resolve(outputDir)}`)
@@ -267,15 +291,24 @@ async function main() {
     process.exitCode = 1
   }
   const processed = Math.max(1, done + failures.length)
-  const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'lamaExec', 'clean', 'prepare', 'segment', 'segmentExec', 'encode'].filter((k) => timings[k] !== undefined)
+  const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'lamaExec', 'clean', 'prepare', 'segment', 'segmentExec', 'refine', 'encode'].filter((k) => timings[k] !== undefined)
   console.log(`Average ms per image by stage: ${stages.map((k) => `${k} ${Math.round(timings[k] / processed)}`).join(', ')} (${opts.jobs} images in flight overlap, so these do not add up to the per-image time)`)
+  {
+    const wall = (performance.now() - started) / 1000
+    const usage = process.cpuUsage()
+    const cores = os.availableParallelism()
+    const used = (usage.user + usage.system) / 1e6 / Math.max(wall, 0.001)
+    const busy = performance.eventLoopUtilization().utilization
+    const verdict = busy > 0.85 ? 'its main thread is the limit: run more parts side by side (SHARDS)' : used > 0.85 * cores ? 'the CPU is full: more parallelism will not help, only less work per image' : 'neither is full: more images in flight (--jobs) or more parts (SHARDS) should help'
+    console.log(`This process used about ${used.toFixed(1)} of ${cores} CPU cores on average and its main thread was busy ${(100 * busy).toFixed(0)}% of the time: ${verdict}.`)
+  }
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) {
     const by = (s) => wmRows.filter((r) => r.status === s).length
     console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
     if (wmRows.length) {
       fs.mkdirSync(outputDir, { recursive: true })
-      fs.writeFileSync(path.join(outputDir, 'watermark-report.csv'), csvRows(wmRows))
+      fs.writeFileSync(path.join(outputDir, shard.count > 1 ? `watermark-report-part${shard.index}of${shard.count}.csv` : 'watermark-report.csv'), csvRows(wmRows))
     }
   }
   for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)
