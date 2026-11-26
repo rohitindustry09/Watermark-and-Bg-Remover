@@ -87,7 +87,12 @@ function makeRun(server, spec, state) {
       Object.assign(state, await openSession(server, spec, state.precision)) // the server restarted since the model was loaded
       r = await post(body)
     }
-    if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error ?? `server returned ${r.status}`))
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}))
+      const err = new Error(body.error ?? `server returned ${r.status}`)
+      err.fatal = r.status === 503 && body.fatal === true // the GPU is dead: every further image would fail the same way
+      throw err
+    }
     const outputs = decodeTensors(Buffer.from(await r.arrayBuffer()))
     outputs.runMs = Number(r.headers.get('X-Run-Ms')) || 0 // time inside the model on the server, without queueing
     return outputs
@@ -264,6 +269,9 @@ async function main() {
   const failures = []
   let done = 0
   let next = 0
+  let fatal = null // set when the run cannot go on (dead GPU, dead server): every part stops taking images
+  let inARow = 0 // failures since the last success
+  let lastProgress = performance.now()
   const started = performance.now()
   const report = () => {
     const secs = (performance.now() - started) / 1000
@@ -271,8 +279,19 @@ async function main() {
   }
   const ticker = setInterval(report, 1000)
 
+  // Nothing finished for a while: ask the server. A server that does not answer, or one that reports a dead GPU, ends the run with a clear message.
+  const STALL_MS = Number(process.env.BATCH_STALL_MS ?? 120_000)
+  const stallCheck = setInterval(async () => {
+    if (fatal || performance.now() - lastProgress < STALL_MS) return
+    const h = await fetch(`${opts.server}/api/health`, { signal: AbortSignal.timeout(5000) }).then((r) => r.json()).catch(() => null)
+    if (!h) fatal = Object.assign(new Error(`No image has finished for ${Math.round((performance.now() - lastProgress) / 1000)} s and the inference server does not answer. Check ~/server.log; if the GPU crashed, reboot the instance.`), { fatal: true })
+    else if (h.gpuFailure) fatal = Object.assign(new Error(h.gpuFailure), { fatal: true })
+    else console.log(`\nNo image has finished for ${Math.round((performance.now() - lastProgress) / 1000)} s, but the server still answers (it may be loading a model or busy).`)
+    lastProgress = performance.now() // look again after another interval, not on every tick
+  }, 15_000)
+
   const worker = async () => {
-    while (next < work.length) {
+    while (next < work.length && !fatal) {
       const { src, dest } = work[next++]
       try {
         const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
@@ -281,19 +300,36 @@ async function main() {
         fs.writeFileSync(`${dest}.part`, png)
         fs.renameSync(`${dest}.part`, dest) // never leaves a half-written file that a re-run would skip
         done++
+        inARow = 0
+        lastProgress = performance.now()
       } catch (e) {
+        if (e.fatal) {
+          fatal = e
+          break
+        }
         failures.push({ src, error: [e.message ?? String(e), e.cause?.message ?? e.cause?.code].filter(Boolean).join(': ').split('\n')[0] })
+        lastProgress = performance.now()
+        if (++inARow >= 8) {
+          fatal = Object.assign(new Error(`${inARow} images in a row failed (the last: ${failures.at(-1).error}). The inference server has probably stopped: see ~/server.log.`), { fatal: true })
+          break
+        }
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(opts.jobs, work.length) }, worker))
   clearInterval(ticker)
+  clearInterval(stallCheck)
   report()
+  if (fatal) {
+    console.error(`\n\nSTOPPED: ${fatal.message}`)
+    console.error(`${done} images were finished before this; run the same command again to continue (finished images are skipped).`)
+    process.exitCode = 4
+  }
   console.log(`\nFinished ${done} images in ${((performance.now() - started) / 1000).toFixed(1)} s -> ${path.resolve(outputDir)}`)
   if (failures.length) {
     for (const f of failures.slice(0, 20)) console.log(`  failed: ${f.src}: ${f.error}`)
     if (failures.length > 20) console.log(`  ... and ${failures.length - 20} more`)
-    process.exitCode = 1
+    if (!fatal) process.exitCode = 1 // (a stopped run keeps its own exit code, 4)
   }
   const processed = Math.max(1, done + failures.length)
   const stages = ['decode', 'detect', 'detectCompute', 'fill', 'lamaCall', 'lamaExec', 'clean', 'prepare', 'segment', 'segmentExec', 'refine', 'encode'].filter((k) => timings[k] !== undefined)

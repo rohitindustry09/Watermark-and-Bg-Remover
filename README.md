@@ -30,14 +30,26 @@ npm run app        # inference server on 127.0.0.1:8787 + the web page on 127.0.
 ## GPU server quick start (Ubuntu 24.04 + NVIDIA)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rohitindustry09/Watermark-and-Bg-Remover/main/scripts/server-setup.sh | bash   # once; safe to repeat
+# once, on a fresh server (cloning with git always gets the newest scripts; the setup is safe to repeat)
+sudo apt-get update -qq; sudo apt-get install -y git && git clone https://github.com/rohitindustry09/Watermark-and-Bg-Remover.git ~/Watermark-and-Bg-Remover && bash ~/Watermark-and-Bg-Remover/scripts/server-setup.sh
+source ~/.bashrc
+
+# put the originals on the server (from your computer: scp -P <port> originals.zip ubuntu@<ip>:~/ ), then:
+unzip -q ~/originals.zip -d ~/Brass
 bash ~/Watermark-and-Bg-Remover/scripts/server-run.sh test ~/Brass      # 15-image test -> ~/test-results.zip to download and check
-bash ~/Watermark-and-Bg-Remover/scripts/server-run.sh full ~/Brass      # everything -> ~/out and ~/out.zip
+nohup bash ~/Watermark-and-Bg-Remover/scripts/server-run.sh full ~/Brass > ~/full.log 2>&1 &    # everything -> ~/out.zip (resumes if run again)
+tr '\r' '\n' < ~/full.log | tail -5                                      # progress
 ```
 
 `server-setup.sh` installs Node 22, the CUDA 13 runtime and cuDNN 9 that the GPU build of onnxruntime needs, and the project. `server-run.sh` starts the
-inference server in the background, learns the watermark pattern from the folder if `~/wm-pattern.json` does not exist, and runs the batch with the
-full BiRefNet, WebP output and watermark removal. `bash scripts/server-run.sh help` lists the commands and the settings (`MODEL`, `JOBS`, `QUALITY`).
+inference server in the background, uses the watermark pattern that ships with the project (`assets/wm-pattern.json`, learned from the real photos; `server-run.sh learn <folder>`
+makes a new one), and runs the batch with the full BiRefNet, 2048 px WebP output and watermark removal. `bash scripts/server-run.sh help` lists the commands and the
+settings (`MODEL`, `JOBS`, `SHARDS`, `QUALITY`, `MAX_EDGE`).
+
+**If the GPU stops working** (on a shared GPU its connection can crash: the server log says `haishare proxy exited`), the run notices within about 90 seconds, stops, and
+says so (exit code 4). Reboot the instance and run the same command again; finished images are skipped. A server that stops answering, or many images in a row
+failing, also ends the run with a message instead of letting it crawl. After the run, `watermark-report.csv` lists every image the pattern did not find a watermark in
+(`uncertain` / `none`): look at those by eye.
 
 ## Bulk background removal from the command line (no browser)
 

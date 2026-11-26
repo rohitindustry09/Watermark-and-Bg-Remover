@@ -179,3 +179,21 @@ describe('findAll and isWatermark', () => {
     expect(tpl.isWatermark(found[0], learned)).toBe(true)
   })
 })
+
+describe('searchScales', () => {
+  const samples = [sample(50, 200, 1), sample(120, 180, 1.1), sample(80, 220, 0.9), sample(200, 150, 1), sample(30, 100, 1.05), sample(150, 240, 0.95), sample(220, 60, 1)]
+  const { tpl: learned } = tpl.learnTemplate(samples)
+
+  it('keeps every learned size and adds smaller ones, down to 0.3 of the reference width, in ascending order', () => {
+    const scales: number[] = tpl.searchScales(learned)
+    for (const s of learned.scales) expect(scales).toContain(s)
+    expect(Math.min(...scales)).toBeGreaterThanOrEqual(0.3 - 1e-9)
+    expect(Math.min(...scales)).toBeLessThanOrEqual(Math.min(...learned.scales))
+    expect([...scales].sort((a, b) => a - b)).toEqual(scales)
+  })
+
+  it('adds nothing when the learned sizes already reach the smallest searched size', () => {
+    const lowReach = { ...learned, scales: [0.3, 0.5, 1] }
+    expect(tpl.searchScales(lowReach)).toEqual([0.3, 0.5, 1])
+  })
+})

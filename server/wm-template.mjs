@@ -150,13 +150,24 @@ function templateAt(tpl, scale, shrink = 1) {
   return { ...standardise(resample(tpl.data, tpl.cw, tpl.ch, tw, th)), tw, th }
 }
 
+/** The smallest size searched, as a fraction of the learned reference width: the same watermark appears far smaller on photos where the product is shown small. */
+const MIN_SEARCH_SCALE = 0.3
+
+/** The sizes to search: the learned ones, plus smaller ones in steps of 0.8x down to MIN_SEARCH_SCALE (a pattern file learned from mostly full-size marks stops at about 0.6). */
+export function searchScales(tpl) {
+  const learned = [...tpl.scales].sort((a, b) => a - b)
+  const smaller = []
+  for (let s = learned[0] * 0.8; s >= MIN_SEARCH_SCALE; s *= 0.8) smaller.unshift(s)
+  return [...smaller, ...learned]
+}
+
 /**
  * Finds the learned pattern in an evidence map: a coarse search at half size over every scale, then a fine search around the best candidates.
  * `region` ([x0,y0,x1,y1] fractions of the map) limits where the pattern may start; the default is the whole map.
  */
 export function matchTemplate(map, tpl, { region, scales } = {}) {
   const { w, h } = map
-  const list = scales ?? tpl.scales
+  const list = scales ?? searchScales(tpl)
   const reg = region ?? [0, 0, 1, 1]
   const coarse = halve(map)
   const cI = integrals(coarse.E, coarse.w, coarse.h)

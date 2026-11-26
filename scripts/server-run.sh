@@ -15,6 +15,7 @@ PORT="${INFERENCE_PORT:-8787}"
 URL="http://127.0.0.1:$PORT"
 LOG="${SERVER_LOG:-$HOME/server.log}"
 PATTERN="${WM_PATTERN:-$HOME/wm-pattern.json}"
+BUNDLED_PATTERN="$ROOT/assets/wm-pattern.json"   # the pattern of the "Dharma Statues" watermark, learned from the real photos and shipped with the project
 MODEL="${MODEL:-birefnet}"      # birefnet (full, most precise) | birefnet-lite | rmbg-1.4 | modnet
 JOBS="${JOBS:-4}"               # images in flight in each part
 CORES="$(nproc)"
@@ -50,7 +51,17 @@ start_server() {
 
 stop_server() {
   command -v pkill >/dev/null || { echo "pkill is not available here; stop the node process that runs server/index.mjs yourself."; return 1; }
-  pkill -f "server/index.mjs" 2>/dev/null && echo "Inference server stopped." || echo "No inference server was running."
+  if ! pkill -TERM -f "server/index.mjs" 2>/dev/null; then
+    echo "No inference server was running."
+    return 0
+  fi
+  # the server releases its models before it exits; give it time, and only then insist
+  for _ in $(seq 1 15); do
+    pgrep -f "server/index.mjs" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  pkill -KILL -f "server/index.mjs" 2>/dev/null || true
+  echo "Inference server stopped."
 }
 
 need_zip() {
@@ -70,10 +81,16 @@ learn() {
 }
 
 ensure_pattern() {
-  if [ ! -s "$PATTERN" ]; then
-    echo "No watermark pattern yet at $PATTERN: learning it from $1 first."
-    learn "$1"
+  if [ -s "$PATTERN" ]; then
+    return
   fi
+  if [ -s "$BUNDLED_PATTERN" ]; then
+    cp "$BUNDLED_PATTERN" "$PATTERN"
+    echo "Using the watermark pattern that ships with the project (no learning needed). To learn a new one from your photos: bash scripts/server-run.sh learn <folder>"
+    return
+  fi
+  echo "No watermark pattern yet at $PATTERN: learning it from $1 first."
+  learn "$1"
 }
 
 batch() { # <input> <output> [extra batch options]
@@ -103,11 +120,23 @@ run_parts() { # <input> <output>
     done
     echo "$(date +%H:%M:%S)$line"
   done
-  for p in "${pids[@]}"; do wait "$p" || status=1; done
+  local rc fatal=0
+  for p in "${pids[@]}"; do
+    rc=0
+    wait "$p" || rc=$?
+    [ "$rc" -eq 0 ] || status=1
+    [ "$rc" -eq 4 ] && fatal=1
+  done
   for i in $(seq 1 "$SHARDS"); do
     echo "--- part $i"
     tr '\r' '\n' <"$HOME/part-$i.log" | grep -E 'Finished|failed:|Watermark removed|This process used' || true
   done
+  if [ "$fatal" -eq 1 ]; then
+    echo
+    echo "THE RUN STOPPED because the GPU or the inference server stopped answering (see the STOPPED line above)."
+    echo "If the GPU crashed: reboot the instance on the dashboard, log in again and run the same command again. Finished images are skipped."
+    return 4
+  fi
   # one report for the whole run
   local reports=("$out"/watermark-report-part*.csv)
   if [ -e "${reports[0]}" ]; then
@@ -151,8 +180,17 @@ case "${1:-help}" in
     if [ "$SHARDS" -le 1 ]; then
       batch "$2" "$OUT" --zip "${OUT%/}.zip"
     else
-      run_parts "$2" "$OUT" || echo "Some parts reported failed images: see ~/part-N.log (a re-run only redoes those)."
+      rc=0
+      run_parts "$2" "$OUT" || rc=$?
+      [ "$rc" -eq 4 ] && exit 4 # stopped on a dead GPU: no zip of a half-finished set
+      [ "$rc" -eq 0 ] || echo "Some parts reported failed images: see ~/part-N.log (a re-run only redoes those)."
       (cd "$OUT" && zip -0qr "${OUT%/}.zip" .)
+    fi
+    if [ -s "$OUT/watermark-report.csv" ]; then
+      TOTAL=$(($(wc -l <"$OUT/watermark-report.csv") - 1))
+      WEAK=$(awk -F, 'NR > 1 && $2 != "found" && $2 != "colour-backup" { n++ } END { print n + 0 }' "$OUT/watermark-report.csv")
+      echo
+      echo "Watermark report: $WEAK of $TOTAL images had no confident watermark match (uncertain or none). They are listed in $OUT/watermark-report.csv: check those by eye."
     fi
     echo
     echo "Finished in $(((SECONDS - STARTED) / 60)) min. Download ${OUT%/}.zip from your PC (scp), then stop or destroy the server so it stops billing."
@@ -164,7 +202,8 @@ Usage: bash scripts/server-run.sh <command> [folder]
   start            start the inference server in the background (log: ~/server.log)
   stop             stop it
   status           is it running?
-  learn  <folder>  learn the watermark pattern from a folder of original photos (-> ~/wm-pattern.json)
+  learn  <folder>  learn a new watermark pattern from a folder of original photos (-> ~/wm-pattern.json). Not needed for the
+                   "Dharma Statues" watermark: its pattern ships with the project and is used automatically.
   test   <folder>  run a 15-image test: learns the pattern if needed, writes ~/test-results.zip to download and check
   full   <folder> [out]   run every image in <folder>; results in [out] (default ~/out) and a zip next to it.
                           Finished files are skipped, so after an interruption run the same command again.

@@ -21,6 +21,27 @@ const GPU_PROVIDERS = PROVIDERS.filter((p) => p !== 'cpu')
 const LAMA_SESSIONS = Math.max(1, Math.floor(Number(process.env.LAMA_SESSIONS ?? 1)) || 1)
 const isPooled = (file) => LAMA_SESSIONS > 1 && /LaMa/i.test(file)
 
+/**
+ * Longest a GPU call may take before the GPU is declared dead. On a shared GPU (Hostinger) the sharing layer can crash ("haishare proxy exited"), after which
+ * CUDA calls hang or fail forever; without this the run would sit at 0 images/s while the hours are billed. CPU calls are not limited: a large model can take
+ * minutes there. INFERENCE_RUN_TIMEOUT_CPU=1 applies the limit to the CPU as well (for tests).
+ */
+const RUN_TIMEOUT_MS = Number(process.env.INFERENCE_RUN_TIMEOUT_MS ?? 90_000)
+const timeoutApplies = (provider) => provider !== 'cpu' || process.env.INFERENCE_RUN_TIMEOUT_CPU === '1'
+/** Set once the GPU has stopped answering: from then on every GPU call (and new session) fails at once with this text, which the batch shows and stops on. */
+let gpuFailure = null
+class RunTimeout extends Error {}
+function withTimeout(promise, ms) {
+  promise.catch(() => undefined) // the call may still fail later, after we stopped waiting for it: that must not crash the process
+  let timer
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new RunTimeout(`no answer within ${Math.round(ms / 1000)} s`)), ms)
+  })
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer))
+}
+const gpuDown = (why) =>
+  `The GPU stopped working (${why}). On a shared GPU this usually means its connection crashed (look for "haishare proxy exited" in the server log). Reboot the instance, then run the same command again: finished images are skipped.`
+
 ort.env.logLevel = 'error' // warnings about nodes left on the CPU are expected and noisy
 fs.mkdirSync(MODEL_DIR, { recursive: true })
 
@@ -163,9 +184,10 @@ const json = (res, status, body) => {
 async function handle(req, res) {
   const url = new URL(req.url, 'http://x')
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    return json(res, 200, { ok: true, gpu: GPU_PROVIDERS[0] ?? null, providers: PROVIDERS, sessions: sessions.size })
+    return json(res, 200, { ok: true, gpu: GPU_PROVIDERS[0] ?? null, providers: PROVIDERS, sessions: sessions.size, gpuFailure })
   }
   if (req.method === 'POST' && url.pathname === '/api/session') {
+    if (gpuFailure) return json(res, 503, { error: gpuFailure, fatal: true })
     const { url: modelUrl } = JSON.parse((await readBody(req)).toString('utf8'))
     const file = await ensureModel(modelUrl)
     const holder = await acquire(file)
@@ -188,11 +210,24 @@ async function handle(req, res) {
       return result
     }
     const target = entry.pool ? entry.pool[entry.next++ % entry.pool.length] : entry // a pooled model: the next session in turn
+    if (gpuFailure && target.provider !== 'cpu') return json(res, 503, { error: gpuFailure, fatal: true })
     try {
-      out = await exclusive(target.lane ?? target.provider, timed(target.session))
+      const call = exclusive(target.lane ?? target.provider, timed(target.session))
+      out = timeoutApplies(target.provider) ? await withTimeout(call, RUN_TIMEOUT_MS) : await call
     } catch (e) {
+      if (e instanceof RunTimeout) {
+        gpuFailure = gpuDown(`${path.basename(target.file)} gave no answer within ${Math.round(RUN_TIMEOUT_MS / 1000)} s`)
+        log(gpuFailure)
+        return json(res, 503, { error: gpuFailure, fatal: true })
+      }
       if (target.provider === 'cpu') throw e
-      // The GPU failed on a real input: move this model to the CPU for good and retry once.
+      if (target.provider === 'cuda') {
+        // A CUDA failure on a real input is not something a silent switch to the CPU should hide: the run would crawl for hours. Stop it and say why.
+        gpuFailure = gpuDown(`${path.basename(target.file)} failed: ${String(e.message ?? e).split('\n')[0].slice(0, 140)}`)
+        log(gpuFailure)
+        return json(res, 503, { error: gpuFailure, fatal: true })
+      }
+      // Another GPU provider (DirectML) failed on a real input: move this model to the CPU for good and retry once.
       log(`${path.basename(target.file)} failed on ${target.provider}, moving to cpu: ${String(e.message ?? e).split('\n')[0].slice(0, 140)}`)
       providerFor.set(target.file, 'cpu')
       target.session = await exclusive('cpu', () => ort.InferenceSession.create(target.file, options('cpu')))
@@ -243,6 +278,25 @@ const server = http.createServer((req, res) => {
     else res.end()
   })
 })
+// A clean shutdown releases the models (and with them the GPU memory) before the process ends. Killing a process that is holding a shared GPU abruptly
+// is the kind of thing that can upset the sharing layer, so "stop" asks politely first.
+let closing = false
+async function shutdown(signal) {
+  if (closing) return
+  closing = true
+  log(`${signal}: shutting down`)
+  const hardStop = setTimeout(() => process.exit(0), 8000)
+  server.close()
+  try {
+    for (const holder of new Set(sessions.values())) for (const member of holder.pool ?? [holder]) await member.session.release()
+  } catch {
+    // nothing more to do: the process ends next
+  }
+  clearTimeout(hardStop)
+  process.exit(0)
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'))
+process.on('SIGINT', () => void shutdown('SIGINT'))
 server.requestTimeout = 0
 // Node closes an idle keep-alive connection after 5 s by default; a client that reuses it at that moment gets ECONNRESET. A long batch pauses
 // longer than that between requests on a pooled connection, so keep them open well past any realistic gap.
