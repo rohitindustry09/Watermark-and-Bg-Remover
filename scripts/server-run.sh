@@ -197,9 +197,10 @@ case "${1:-help}" in
     rm -rf "$HOME/redo-in" "$HOME/redo-out" "$HOME/redo-debug" "$HOME/redo-results.zip"
     node scripts/redo-list.mjs "$OUT/watermark-report.csv" "$2" "$HOME/redo-in"
     [ -n "$(ls -A "$HOME/redo-in" 2>/dev/null)" ] || { echo "Nothing to redo."; exit 0; }
-    # a looser copy of the pattern: the images in the report had a best match that was too weak to trust, so the best match is accepted here and the mask
-    # overlays (redo-debug) are there to check by eye. The finished results in $OUT are not touched.
-    node scripts/redo-list.mjs --relax "$PATTERN" "$HOME/wm-pattern-relaxed.json" "${REDO_THRESHOLD:-0.8}" "${REDO_STRENGTH:-0.35}"
+    # a looser copy of the pattern: the shape score may be lower (these marks are faint, so it matches less cleanly), but the tint strength must still be as
+    # strong as for a clear watermark: on the 40 images this was checked on, every match with that strength sat on real watermark text and every weaker one did not.
+    # The overlays (redo-debug) are there to check by eye. The finished results in $OUT are not touched.
+    node scripts/redo-list.mjs --relax "$PATTERN" "$HOME/wm-pattern-relaxed.json" "${REDO_THRESHOLD:-0.7}" "${REDO_STRENGTH:-1}"
     SAVED_PATTERN="$PATTERN"
     PATTERN="$HOME/wm-pattern-relaxed.json"
     batch "$HOME/redo-in" "$HOME/redo-out" --wm-double-check --debug-masks "$HOME/redo-debug" || echo "(some images failed: see the lines above.)"
