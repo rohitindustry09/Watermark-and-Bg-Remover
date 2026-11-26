@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-time (and safe to repeat) setup of a fresh Ubuntu 24.04 GPU server: system tools, Node 22, the CUDA 13 runtime + cuDNN that onnxruntime-node's
-# GPU build needs, and this project. Run it as your normal user (it uses sudo where needed):
+# One-time (and safe to repeat) setup of a fresh Ubuntu 24.04 GPU server: system tools, Node 22, the CUDA runtime + cuDNN that onnxruntime-node's
+# GPU build needs (CUDA 13 or 12, chosen by the driver), and this project. Run it as your normal user (it uses sudo where needed):
 #   curl -fsSL https://raw.githubusercontent.com/rohitindustry09/Watermark-and-Bg-Remover/main/scripts/server-setup.sh | bash
 # Every step checks whether it is already done, so running it again only fixes what is missing.
 set -euo pipefail
@@ -53,20 +53,33 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.spli
 fi
 echo "node $(node -v), npm $(npm -v)"
 
-say "CUDA 13 runtime and cuDNN 9 (needed for the GPU)"
+say "CUDA runtime and cuDNN 9 (needed for the GPU)"
+# The newest onnxruntime-node is built for CUDA 13, which needs a driver that supports CUDA 13 (580 or newer). Some machines (Hostinger Texas: driver 570,
+# CUDA 12.8) have an older driver: there the CUDA 13 build fails with "CUDA driver version is insufficient", so we use the CUDA 12 build (1.23.2) and the
+# CUDA 12 cuDNN instead. The driver's CUDA version decides which one.
+DRIVER_CUDA="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9]*\)\..*/\1/p' | head -1)"
+DRIVER_CUDA="${DRIVER_CUDA:-12}"
+if [ "$DRIVER_CUDA" -ge 13 ]; then CUDA_MAJOR=13; CUDA_PKG=cuda-libraries-13-0; else CUDA_MAJOR=12; CUDA_PKG=cuda-libraries-12-8; fi
+echo "The driver supports CUDA $DRIVER_CUDA, so the CUDA $CUDA_MAJOR libraries are used."
 # The checks capture the command's output first and search that: with "set -o pipefail", "ldconfig -p | grep -q x" reports failure even when x is found
 # (grep -q exits at the first match and the left side gets SIGPIPE).
 libs_present() {
   local libs
   libs="$(ldconfig -p 2>/dev/null || true)"
-  grep -q 'libcublasLt.so.13' <<<"$libs" && grep -q 'libcudnn.so.9' <<<"$libs"
+  grep -q "libcublasLt.so.$CUDA_MAJOR" <<<"$libs" && grep -q 'libcudnn.so.9' <<<"$libs"
+}
+# cuDNN 9 comes in one build per CUDA major; the wrong one loads but fails with CUDNN_STATUS_NOT_INITIALIZED.
+cudnn_matches() {
+  local installed
+  installed="$(dpkg -l 2>/dev/null | awk '/^ii +libcudnn9-cuda-/ { print $2 }' || true)"
+  grep -qx "libcudnn9-cuda-$CUDA_MAJOR" <<<"$installed"
 }
 cuda_visible() {
   local policy
-  policy="$(apt-cache policy cuda-libraries-13-0 2>/dev/null || true)"
+  policy="$(apt-cache policy "$CUDA_PKG" 2>/dev/null || true)"
   grep -q 'Candidate: [0-9]' <<<"$policy"
 }
-if libs_present; then
+if libs_present && cudnn_matches; then
   echo "Already installed."
 else
   # Add NVIDIA's package source only if apt cannot already see the CUDA packages (the Hostinger image has it set up, and adding it twice makes apt fail).
@@ -75,12 +88,17 @@ else
     sudo dpkg -i /tmp/cuda-keyring.deb
     sudo apt-get update -qq
   fi
-  sudo apt-get install -y cuda-libraries-13-0 libcudnn9-cuda-13
-  sudo ldconfig
+  # libcudnn9-cuda-12 and -13 replace each other, so apt swaps the wrong one out.
   if libs_present; then
+    sudo apt-get install -y "libcudnn9-cuda-$CUDA_MAJOR"
+  else
+    sudo apt-get install -y "$CUDA_PKG" "libcudnn9-cuda-$CUDA_MAJOR"
+  fi
+  sudo ldconfig
+  if libs_present && cudnn_matches; then
     echo "Installed."
   else
-    echo "The CUDA 13 runtime or cuDNN 9 is still missing after the install; the GPU cannot be used. Stopping."
+    echo "The CUDA $CUDA_MAJOR runtime or cuDNN 9 is still missing after the install; the GPU cannot be used. Stopping."
     exit 1
   fi
 fi
@@ -93,7 +111,11 @@ else
 fi
 cd "$DIR"
 npm install --no-audit --no-fund
-echo "Project ready in $DIR"
+if [ "$CUDA_MAJOR" = 12 ]; then
+  # The project's onnxruntime-node is the CUDA 13 build; swap in the last CUDA 12 build for this older driver (not saved to package.json).
+  npm install --no-save --no-audit --no-fund onnxruntime-node@1.23.2
+fi
+echo "Project ready in $DIR (CUDA $CUDA_MAJOR)"
 
 say "Done"
 echo "Next: bash $DIR/scripts/server-run.sh help"
