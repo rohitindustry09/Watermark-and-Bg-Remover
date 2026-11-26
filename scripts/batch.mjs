@@ -12,7 +12,7 @@ import { findByTemplate, findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, mask
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
 import { mergeRows, parseCsv, toCsv } from '../server/report.mjs'
 import { parseShard, shardItems } from '../server/shard.mjs'
-import { parseTemplate } from '../server/wm-template.mjs'
+import { loadPatterns } from '../server/patterns.mjs'
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif|tiff?|bmp|gif)$/i
 
@@ -140,6 +140,13 @@ function zipFolder(dir, zipPath) {
   console.log(`Zip written: ${target} (${(fs.statSync(target).size / 1e9).toFixed(2)} GB)`)
 }
 
+/** " (name n, name m)" when more than one pattern found a watermark, else nothing. */
+function patternCounts(rows) {
+  const counts = new Map()
+  for (const r of rows) if (r.status === 'found' && r.pattern) counts.set(r.pattern, (counts.get(r.pattern) ?? 0) + 1)
+  return counts.size > 1 ? ` (${[...counts].map(([name, n]) => `${name} ${n}`).join(', ')})` : ''
+}
+
 async function main() {
   const { inputDir, outputDir, opts } = parseArgs(process.argv.slice(2))
   const spec = MODEL_SPECS[opts.model]
@@ -148,7 +155,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json | folder | a,b,c> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -220,21 +227,28 @@ async function main() {
   const wmRows = [] // one row per image for watermark-report.csv
   const timings = {} // wall-clock ms per stage, summed over images; the images in flight overlap, so this shows proportions, not a total
   if (opts['remove-watermarks'] || opts['wm-template']) {
-    const pattern = opts['wm-template'] ? parseTemplate(fs.readFileSync(opts['wm-template'], 'utf8')) : null
+    const patterns = opts['wm-template'] ? loadPatterns(opts['wm-template']) : []
+    if (opts['wm-template'] && patterns.length === 0) throw new Error(`No watermark pattern found in: ${opts['wm-template']}`)
+    const pattern = patterns.length > 0
     const lamaSpec = { url: () => LAMA_URL }
     const lamaSession = await openSession(opts.server, lamaSpec, 'fp32')
     lamaState = { sid: lamaSession.sid, precision: 'fp32' }
-    console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}. Finder: ${pattern ? 'learned pattern' : 'colour detector (every image, in full)'}.`)
+    console.log(`Watermark filler (LaMa) ready on ${lamaSession.provider}. Finder: ${pattern ? `learned pattern${patterns.length > 1 ? `s, tried in this order: ${patterns.map((p) => p.name).join(', ')}` : ''}` : 'colour detector (every image, in full)'}.`)
     const lama = makeLama(makeRun(opts.server, lamaSpec, lamaState), lamaSession, timings)
 
     /** The pattern finder first; its weaker matches (and, with --wm-double-check, its misses) get the colour detector as a second opinion. */
     const findMarks = async (rgba, width, height) => {
       if (!pattern) return { ...(await findWatermark(rgba, width, height)), status: 'found', score: 1 }
-      const found = await findByTemplate(rgba, width, height, pattern)
-      if (found.status === 'found') return found
+      // each pattern in turn: the first one that finds the watermark wins; otherwise the weak match with the best score is kept for the second opinion
+      let found = null
+      for (const p of patterns) {
+        const attempt = { ...(await findByTemplate(rgba, width, height, p.tpl)), pattern: p.name }
+        if (attempt.status === 'found') return attempt
+        if (!found || attempt.score > found.score) found = attempt
+      }
       if (found.status === 'uncertain' || opts['wm-double-check']) {
         const backup = await findWatermark(rgba, width, height)
-        if (backup.marks > 0) return { ...backup, status: 'colour-backup', score: found.score }
+        if (backup.marks > 0) return { ...backup, status: 'colour-backup', score: found.score, pattern: 'colour' }
       }
       return found
     }
@@ -246,7 +260,7 @@ async function main() {
       timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
       const box = found.tight?.[0]
-      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', copies: found.marks, score: found.score.toFixed(2), x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
+      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', copies: found.marks, score: found.score.toFixed(2), pattern: found.marks > 0 ? (found.pattern ?? '') : '', x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
       if (found.marks === 0) return
       wmStats.withMark++
       if (opts['debug-masks']) {
@@ -340,7 +354,7 @@ async function main() {
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) {
     const by = (s) => wmRows.filter((r) => r.status === s).length
-    if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
+    if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by a pattern${patternCounts(wmRows)}, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
     if (wmRows.length) {
       fs.mkdirSync(outputDir, { recursive: true })
       {

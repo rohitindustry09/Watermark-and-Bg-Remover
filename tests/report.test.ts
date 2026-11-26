@@ -15,6 +15,14 @@ describe('watermark report CSV', () => {
     expect(parseCsv(text)).toEqual([{ file: 'a\nb.jpg', status: 'found' }, { file: 'c.jpg', status: 'none' }])
   })
 
+  it('keeps a column that only some rows have (the pattern name) when rows are written', () => {
+    const rows = [row('a.jpg', 'found'), { ...row('b.jpg', 'found'), pattern: 'faint' }]
+    const back = parseCsv(toCsv(rows))
+    expect(Object.keys(back[0])).toContain('pattern')
+    expect(back[1].pattern).toBe('faint')
+    expect(back[0].pattern).toBe('')
+  })
+
   it('returns nothing for an empty file', () => {
     expect(parseCsv('')).toEqual([])
     expect(toCsv([])).toBe('')

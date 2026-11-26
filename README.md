@@ -74,6 +74,12 @@ npm run batch -- <inputDir> <outputDir> [--model birefnet|birefnet-lite|rmbg-1.4
   0.15 s, the mask follows the letter shapes, and every image gets a status in `watermark-report.csv` in the output folder (`found`, `uncertain`,
   `colour-backup`, `none`). Weak matches fall back to the colour detector; `--wm-double-check` also runs it on images where the pattern found nothing.
   Learn from the original photos, not cutouts (a cutout cuts the watermark off where the background was).
+
+**Several patterns.** The finder can hold a library of patterns and tries them in order, stopping at the first that finds the watermark: the main one
+(`assets/wm-pattern.json`), then `assets/patterns/*.json`, then your own in `~/wm-patterns` (`server-run.sh learn-more <folder> <name>` adds one; `patterns` lists them).
+The report has a `pattern` column saying which one matched. A new pattern must be learned from images that really carry the mark (it cannot be made from the
+finder's own misses). `--wm-template` also accepts a folder or a comma-separated list.
+
 - `--max-edge 2048` caps the longest side of the output (and of the working image): the photo is decoded at the smaller size, so every later step handles far fewer pixels. On 4160 px originals it cuts the CPU work per image from about 7 to about 3 core-seconds (about 2x faster); the server scripts use 2048 by default (`MAX_EDGE=0` keeps the original size). The batch command itself keeps the original size unless the option is given.
 - `--shard 2/4` makes this process take every 4th image (part 2 of 4), so several processes can work on one folder side by side, each with its own main thread, sharing one GPU server. `server-run.sh full` does this for you (`SHARDS=2` by default); each part writes its own `watermark-report-partNofM.csv`, merged into one at the end. At the end of a run the batch says whether its main thread or the CPU was the limit, which tells you whether more parts will help. If a GPU server puts the model on its CPU the batch stops at once (`--allow-cpu` overrides).
 - Edges are refined after the model runs: the soft upscaled matte is steepened and the edge pixels' colour is taken from the solid object next to them, so there is no pale halo on a new background (`--no-refine` turns this off). `--model birefnet` is the full BiRefNet (fp16 490 MB): the most precise on thin parts, and the default of the server scripts.

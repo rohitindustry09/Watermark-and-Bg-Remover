@@ -35,7 +35,8 @@ const cell = (v) => (/[",\n\r]/.test(String(v)) ? `"${String(v).replaceAll('"', 
 /** Rows (objects with the same keys) as CSV text. */
 export function toCsv(rows) {
   if (rows.length === 0) return ''
-  const keys = Object.keys(rows[0])
+  const keys = []
+  for (const row of rows) for (const k of Object.keys(row)) if (!keys.includes(k)) keys.push(k)
   return `${[keys.join(','), ...rows.map((r) => keys.map((k) => cell(r[k] ?? '')).join(','))].join('\n')}\n`
 }
 

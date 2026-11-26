@@ -15,6 +15,7 @@ PORT="${INFERENCE_PORT:-8787}"
 URL="http://127.0.0.1:$PORT"
 LOG="${SERVER_LOG:-$HOME/server.log}"
 PATTERN="${WM_PATTERN:-$HOME/wm-pattern.json}"
+EXTRA_PATTERNS="${WM_PATTERNS_DIR:-$HOME/wm-patterns}"   # your own extra patterns (learn-more): every *.json here is tried after the main pattern
 BUNDLED_PATTERN="$ROOT/assets/wm-pattern.json"   # the pattern of the "Dharma Statues" watermark, learned from the real photos and shipped with the project
 MODEL="${MODEL:-birefnet}"      # birefnet (full, most precise) | birefnet-lite | rmbg-1.4 | modnet
 JOBS="${JOBS:-4}"               # images in flight in each part
@@ -96,7 +97,7 @@ ensure_pattern() {
 batch() { # <input> <output> [extra batch options]
   local in="$1" out="$2"
   shift 2
-  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "$PATTERN" --server "$URL" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
+  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "${PATTERN_SPEC:-$PATTERN,$ROOT/assets/patterns,$EXTRA_PATTERNS}" --server "$URL" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
 }
 
 # Several parts of the folder at once: each part is its own process (its own main thread) and the parts share the one GPU server.
@@ -146,6 +147,16 @@ case "${1:-help}" in
   stop) stop_server ;;
   status) healthy && curl -s "$URL/api/health" && echo || echo "The inference server is not running." ;;
   learn) learn "${2:-}" ;;
+  learn-more)
+    need_dir "${2:-}" learn-more
+    [ -n "${3:-}" ] || { echo "Give the new pattern a name, for example:  $0 learn-more ~/Faint faint"; exit 2; }
+    mkdir -p "$EXTRA_PATTERNS"
+    node scripts/learn-wm.mjs "$2" --out "$EXTRA_PATTERNS/$3.json" --samples "$SAMPLES"
+    echo "Saved as $EXTRA_PATTERNS/$3.json: from now on it is tried after the main pattern (patterns run in name order)."
+    ;;
+  patterns)
+    node scripts/list-patterns.mjs "$PATTERN,$ROOT/assets/patterns,$EXTRA_PATTERNS"
+    ;;
   test)
     need_dir "${2:-}" test
     need_zip
@@ -200,11 +211,12 @@ case "${1:-help}" in
     # a looser copy of the pattern: the shape score may be lower (these marks are faint, so it matches less cleanly), but the tint strength must still be as
     # strong as for a clear watermark: on the 40 images this was checked on, every match with that strength sat on real watermark text and every weaker one did not.
     # The overlays (redo-debug) are there to check by eye. The finished results in $OUT are not touched.
-    node scripts/redo-list.mjs --relax "$PATTERN" "$HOME/wm-pattern-relaxed.json" "${REDO_THRESHOLD:-0.7}" "${REDO_STRENGTH:-1}"
-    SAVED_PATTERN="$PATTERN"
-    PATTERN="$HOME/wm-pattern-relaxed.json"
-    batch "$HOME/redo-in" "$HOME/redo-out" --wm-double-check --debug-masks "$HOME/redo-debug" || echo "(some images failed: see the lines above.)"
-    PATTERN="$SAVED_PATTERN"
+    rm -rf "$HOME/redo-patterns" && mkdir -p "$HOME/redo-patterns"
+    while IFS= read -r p; do
+      node scripts/redo-list.mjs --relax "$p" "$HOME/redo-patterns/$(basename "$p")" "${REDO_THRESHOLD:-0.7}" "${REDO_STRENGTH:-1}" >/dev/null
+    done < <(node scripts/list-patterns.mjs "$PATTERN,$ROOT/assets/patterns,$EXTRA_PATTERNS")
+    echo "Looser copies of $(ls "$HOME/redo-patterns" | wc -l) pattern(s) made."
+    PATTERN_SPEC="$HOME/redo-patterns" batch "$HOME/redo-in" "$HOME/redo-out" --wm-double-check --debug-masks "$HOME/redo-debug" || echo "(some images failed: see the lines above.)"
     (cd "$HOME" && zip -qr redo-results.zip redo-out redo-debug)
     echo
     echo "CAUTION: a looser matcher can also accept a wrong spot and fill a patch of the statue. Check every image against its overlay before using any of them."
@@ -220,6 +232,9 @@ Usage: bash scripts/server-run.sh <command> [folder]
   status           is it running?
   learn  <folder>  learn a new watermark pattern from a folder of original photos (-> ~/wm-pattern.json). Not needed for the
                    "Dharma Statues" watermark: its pattern ships with the project and is used automatically.
+  learn-more <folder> <name>   learn an EXTRA pattern (e.g. for a faint or different look of the watermark) into ~/wm-patterns/<name>.json; the finder tries
+                   the main pattern first and then every extra one in name order, and the report says which pattern matched each image
+  patterns         list the patterns that will be tried
   test   <folder>  run a 15-image test: learns the pattern if needed, writes ~/test-results.zip to download and check
   full   <folder> [out]   run every image in <folder>; results in [out] (default ~/out) and a zip next to it.
                           Finished files are skipped, so after an interruption run the same command again.
