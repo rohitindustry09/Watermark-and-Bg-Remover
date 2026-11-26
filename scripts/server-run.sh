@@ -26,6 +26,7 @@ QUALITY="${QUALITY:-90}"        # WebP quality
 MAX_EDGE="${MAX_EDGE:-2048}"    # longest side of the output in pixels: 2048 is about 2x faster and fits Shopify (0 = keep the original size)
 SAMPLES="${SAMPLES:-120}"       # photos the watermark pattern is learned from
 TEST_COUNT="${TEST_COUNT:-15}"
+export LAMA_SESSIONS="${LAMA_SESSIONS:-4}"   # independent sessions of the watermark fill, so it is not limited to one call at a time (1 = off)
 
 healthy() { curl -fs --max-time 2 "$URL/api/health" >/dev/null 2>&1; }
 
@@ -128,9 +129,11 @@ case "${1:-help}" in
     ensure_pattern "$2"
     rm -rf "$HOME/test-in" "$HOME/test-out" "$HOME/test-debug" "$HOME/test-results.zip"
     mkdir -p "$HOME/test-in"
-    find "$2" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | shuf -n "$TEST_COUNT" | while IFS= read -r f; do
-      cp "$f" "$HOME/test-in/$(basename "$(dirname "$f")" | cut -c1-24)-$(basename "$f")"
-    done
+    n=0
+    while IFS= read -r f; do
+      n=$((n + 1))
+      cp "$f" "$HOME/test-in/$(printf '%03d' "$n")-$(basename "$f")" # numbered, so two folders' "1.jpg" never collide and no name is cut mid-character
+    done < <(find "$2" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | shuf -n "$TEST_COUNT")
     echo "Test images: $(ls "$HOME/test-in" | wc -l)"
     batch "$HOME/test-in" "$HOME/test-out" --debug-masks "$HOME/test-debug" || echo "(some images failed: see the lines above. The results zip is still made.)"
     (cd "$HOME" && zip -qr test-results.zip test-out test-debug)
@@ -167,7 +170,7 @@ Usage: bash scripts/server-run.sh <command> [folder]
                           Finished files are skipped, so after an interruption run the same command again.
 
 Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (parts side by side: one per 4 CPU cores, at least 2),
-QUALITY (90), MAX_EDGE (2048; 0 = original size), SAMPLES (120), TEST_COUNT (15).
+QUALITY (90), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (4), SAMPLES (120), TEST_COUNT (15).
 Example:  MAX_EDGE=0 bash scripts/server-run.sh full ~/Brass   (keep the original size)
 EOF
     ;;
