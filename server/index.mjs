@@ -76,7 +76,9 @@ const options = (provider, threads) => ({
   executionProviders: [provider],
   graphOptimizationLevel: 'all',
   enableMemPattern: provider !== 'dml',
-  executionMode: provider === 'dml' ? 'sequential' : 'parallel',
+  // ONNX Runtime's "parallel" mode made LaMa 55x slower on a CUDA GPU (3.3 s a call against 0.06 s in the default sequential mode, measured on an RTX 4090
+  // with scripts/bench-lama.mjs). Only the CPU provider keeps it.
+  executionMode: provider === 'cpu' ? 'parallel' : 'sequential',
   ...(threads ? { intraOpNumThreads: threads } : {}), // pooled sessions share the CPU: each gets its share of the cores
 })
 const laneOf = (provider, member) => (member ? `${provider}#${member}` : provider)

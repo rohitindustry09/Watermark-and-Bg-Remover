@@ -26,7 +26,7 @@ QUALITY="${QUALITY:-90}"        # WebP quality
 MAX_EDGE="${MAX_EDGE:-2048}"    # longest side of the output in pixels: 2048 is about 2x faster and fits Shopify (0 = keep the original size)
 SAMPLES="${SAMPLES:-120}"       # photos the watermark pattern is learned from
 TEST_COUNT="${TEST_COUNT:-15}"
-export LAMA_SESSIONS="${LAMA_SESSIONS:-4}"   # independent sessions of the watermark fill, so it is not limited to one call at a time (1 = off)
+export LAMA_SESSIONS="${LAMA_SESSIONS:-1}"   # independent sessions of the watermark fill (1 is enough: a call takes ~60 ms on the GPU)
 
 healthy() { curl -fs --max-time 2 "$URL/api/health" >/dev/null 2>&1; }
 
@@ -170,7 +170,7 @@ Usage: bash scripts/server-run.sh <command> [folder]
                           Finished files are skipped, so after an interruption run the same command again.
 
 Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (parts side by side: one per 4 CPU cores, at least 2),
-QUALITY (90), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (4), SAMPLES (120), TEST_COUNT (15).
+QUALITY (90), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (1), SAMPLES (120), TEST_COUNT (15).
 Example:  MAX_EDGE=0 bash scripts/server-run.sh full ~/Brass   (keep the original size)
 EOF
     ;;
