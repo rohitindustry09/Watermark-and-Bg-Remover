@@ -197,3 +197,31 @@ describe('searchScales', () => {
     expect(tpl.searchScales(lowReach)).toEqual([0.3, 0.5, 1])
   })
 })
+
+describe('how a candidate is judged', () => {
+  const samples = [sample(50, 200, 1), sample(120, 180, 1.1), sample(80, 220, 0.9), sample(200, 150, 1), sample(30, 100, 1.05), sample(150, 240, 0.95), sample(220, 60, 1)]
+  const { tpl: learned } = tpl.learnTemplate(samples)
+  const strongEnough = learned.minEvidence * 0.7 // between half and the full minimum
+
+  it('asks a normal candidate for the full tint strength, and one from the finer look for half of it', () => {
+    const base = { score: learned.threshold + 0.1, strength: strongEnough }
+    expect(tpl.isWatermark(base, learned)).toBe(false)
+    expect(tpl.isWatermark({ ...base, fine: true }, learned)).toBe(true)
+    expect(tpl.isWatermark({ ...base, strength: learned.minEvidence * 0.4, fine: true }, learned)).toBe(false)
+  })
+
+  it('never accepts a candidate whose score is below the threshold, however strong its tint', () => {
+    expect(tpl.isWatermark({ score: learned.threshold - 0.05, strength: learned.minEvidence * 10 }, learned)).toBe(false)
+  })
+
+  it('does not look for the pattern in a window with almost no colour signal', () => {
+    // a map whose only structure is the pattern at 1% amplitude: correlation alone would match it, the signal floor must not
+    const w = 400
+    const h = 300
+    const E = new Float32Array(w * h)
+    const p = pattern(68, 14)
+    for (let y = 0; y < 14; y++) for (let x = 0; x < 68; x++) E[(100 + y) * w + 100 + x] = p[y * 68 + x] * 0.01
+    const found = tpl.findAll({ E, w, h }, learned)
+    expect(found.filter((f: object) => tpl.isWatermark(f, learned)).length).toBe(0)
+  })
+})

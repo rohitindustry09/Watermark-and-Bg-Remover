@@ -59,9 +59,9 @@ export function detectInWorker(pixels, width, height) {
 }
 
 /** Finds every instance of the learned pattern `tpl` in an evidence map on a worker; resolves to { instances, ms }. The map is copied. */
-export function findInWorker(map, tpl) {
+export function findInWorker(map, tpl, options = {}) {
   const E = new Float32Array(map.E)
-  return run({ task: 'find', E, w: map.w, h: map.h, tpl }, [E.buffer])
+  return run({ task: 'find', E, w: map.w, h: map.h, tpl, scales: options.scales }, [E.buffer])
 }
 
 export async function closeWatermarkPool() {

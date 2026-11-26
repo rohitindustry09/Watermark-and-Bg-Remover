@@ -15,8 +15,9 @@ const LINEAR = Float32Array.from({ length: 256 }, (_, v) => {
 const lab = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116)
 
 /** Evidence map of an RGBA image: CIELAB a* minus its box-blurred surroundings, floored at 0, at WORK_EDGE on the long side. */
-export async function evidenceMap(rgba, width, height) {
-  const k = WORK_EDGE / Math.max(width, height)
+export async function evidenceMap(rgba, width, height, edge = WORK_EDGE) {
+  const k = edge / Math.max(width, height)
+  const R = Math.round((BLUR_R * edge) / WORK_EDGE) // the same physical blur at any resolution
   const w = Math.max(16, Math.round(width * k))
   const h = Math.max(16, Math.round(height * k))
   const rgb = await sharp(rgba, { raw: { width, height, channels: 4 } }).resize(w, h, { fit: 'fill', kernel: 'lanczos3' }).removeAlpha().raw().toBuffer()
@@ -39,16 +40,16 @@ export async function evidenceMap(rgba, width, height) {
   const bg = new Float32Array(w * h) // the blurred surroundings, kept so the match can be refined at full resolution
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const x0 = Math.max(0, x - BLUR_R)
-      const x1 = Math.min(w, x + BLUR_R + 1)
-      const y0 = Math.max(0, y - BLUR_R)
-      const y1 = Math.min(h, y + BLUR_R + 1)
+      const x0 = Math.max(0, x - R)
+      const x1 = Math.min(w, x + R + 1)
+      const y0 = Math.max(0, y - R)
+      const y1 = Math.min(h, y + R + 1)
       const s = I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0]
       bg[y * w + x] = s / ((x1 - x0) * (y1 - y0))
       E[y * w + x] = Math.max(0, a[y * w + x] - bg[y * w + x])
     }
   }
-  return { E, w, h, bg }
+  return { E, w, h, bg, edge }
 }
 
 /** Bilinear resample of a float plane. */
@@ -108,7 +109,7 @@ function integrals(E, w, h) {
 }
 
 /** Best normalised cross-correlation of the standardised template over positions [xa..xb] x [ya..yb] of the map. */
-function bestIn(map, I, tpl, tw, th, xa, xb, ya, yb, step = 1) {
+function bestIn(map, I, tpl, tw, th, xa, xb, ya, yb, step = 1, minMean = 0) {
   const { E, w, h } = map
   const N = tw * th
   const x0 = Math.max(0, xa)
@@ -120,6 +121,7 @@ function bestIn(map, I, tpl, tw, th, xa, xb, ya, yb, step = 1) {
     for (let x = x0; x <= x1; x += step) {
       const rect = (A) => A[(y + th) * (w + 1) + x + tw] - A[y * (w + 1) + x + tw] - A[(y + th) * (w + 1) + x] + A[y * (w + 1) + x]
       const s1 = rect(I.I1)
+      if (s1 / N < minMean) continue // hardly any colour signal in this window: correlation would only be matching noise
       const varE = rect(I.I2) - (s1 * s1) / N
       if (varE < 1e-3) continue
       let dot = 0
@@ -165,7 +167,10 @@ export function searchScales(tpl) {
  * Finds the learned pattern in an evidence map: a coarse search at half size over every scale, then a fine search around the best candidates.
  * `region` ([x0,y0,x1,y1] fractions of the map) limits where the pattern may start; the default is the whole map.
  */
-export function matchTemplate(map, tpl, { region, scales } = {}) {
+export function matchTemplate(map, tpl, { region, scales, minMean } = {}) {
+  // Correlation ignores brightness, so on a flat backdrop (evidence ~0 everywhere) it happily "finds" the pattern in noise. A window must carry at least this
+  // much colour signal, on average, to be considered; the letters' own mean evidence is 0.4x the learned strength, so this lets faint real marks through.
+  const floor = minMean ?? (tpl.minEvidence ?? 0) * 0.15
   const { w, h } = map
   const list = scales ?? searchScales(tpl)
   const reg = region ?? [0, 0, 1, 1]
@@ -175,7 +180,7 @@ export function matchTemplate(map, tpl, { region, scales } = {}) {
   for (const s of list) {
     const t = templateAt(tpl, s, 2)
     if (t.tw >= coarse.w || t.th >= coarse.h) continue
-    const m = bestIn(coarse, cI, t, t.tw, t.th, Math.floor(reg[0] * coarse.w) - 1, Math.ceil(reg[2] * coarse.w), Math.floor(reg[1] * coarse.h) - 1, Math.ceil(reg[3] * coarse.h))
+    const m = bestIn(coarse, cI, t, t.tw, t.th, Math.floor(reg[0] * coarse.w) - 1, Math.ceil(reg[2] * coarse.w), Math.floor(reg[1] * coarse.h) - 1, Math.ceil(reg[3] * coarse.h), 1, floor)
     cands.push({ ...m, s })
   }
   cands.sort((p, q) => q.score - p.score)
@@ -186,7 +191,7 @@ export function matchTemplate(map, tpl, { region, scales } = {}) {
       const s = c.s * f
       const t = templateAt(tpl, s)
       if (t.tw >= w || t.th >= h) continue
-      const m = bestIn(map, fI, t, t.tw, t.th, c.x * 2 - 6, c.x * 2 + 6, c.y * 2 - 6, c.y * 2 + 6)
+      const m = bestIn(map, fI, t, t.tw, t.th, c.x * 2 - 6, c.x * 2 + 6, c.y * 2 - 6, c.y * 2 + 6, 1, floor)
       if (m.score > best.score) best = { ...m, scale: s, tw: t.tw, th: t.th }
     }
   }
@@ -290,11 +295,11 @@ export function meanEvidence(map, tpl, m) {
  * Every instance of the pattern in the map, best first, up to \`max\`: after each find its surroundings are blanked and the search repeats. A photo can
  * hold the mark twice (the faint one on the product and a bold copy in a header), and the bold one must not hide the faint one.
  */
-export function findAll(map, tpl, { max = 3 } = {}) {
+export function findAll(map, tpl, { max = 3, scales } = {}) {
   const E = new Float32Array(map.E)
   const out = []
   for (let k = 0; k < max; k++) {
-    const m = matchTemplate({ E, w: map.w, h: map.h }, tpl)
+    const m = matchTemplate({ E, w: map.w, h: map.h }, tpl, scales ? { scales } : undefined)
     if (!(m.score >= 0.75 * tpl.threshold)) break
     out.push({ ...m, strength: meanEvidence(map, tpl, m) }) // strength is measured on the real map, not the blanked copy
     blankAround(E, map.w, map.h, m)
@@ -302,8 +307,18 @@ export function findAll(map, tpl, { max = 3 } = {}) {
   return out
 }
 
+/**
+ * The second, finer look for photos where the first search found nothing: the same watermark can be 3 times smaller on photos where the product is shown small,
+ * and on the 400 px map its letters are then a few pixels tall, which is not enough to tell them from noise. At FINE_EDGE px the map is twice as detailed; the
+ * sizes below (relative to the reference width, doubled because the map is) cover marks from 0.2 to about 0.6 of it.
+ */
+export const FINE_EDGE = 800
+/** Share of the normal minimum tint strength that a mark found by the finer look must still have. */
+export const FINE_STRENGTH_SHARE = 0.5
+export const FINE_SCALES = [0.2, 0.25, 0.31, 0.39, 0.49, 0.61].map((s) => s * (FINE_EDGE / WORK_EDGE))
+
 /** An instance counts as the watermark when it correlates well enough and its letters are tinted strongly enough. */
-export const isWatermark = (instance, tpl) => instance.score >= tpl.threshold && instance.strength >= tpl.minEvidence
+export const isWatermark = (instance, tpl) => instance.score >= tpl.threshold && instance.strength >= tpl.minEvidence * (instance.fine ? FINE_STRENGTH_SHARE : 1)
 
 /** The learned letter shape as a 0/1 plane at the matched size (map pixels), thresholded so the letters are covered with a little margin. */
 export function shapeAt(tpl, tw, th) {

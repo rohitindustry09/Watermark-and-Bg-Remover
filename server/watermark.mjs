@@ -3,7 +3,7 @@
 import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
 import { detectInWorker, findInWorker } from './wm-pool.mjs'
-import { evidenceMap, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
+import { evidenceMap, FINE_EDGE, FINE_SCALES, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
@@ -96,11 +96,25 @@ export function growOntoEvidence(plane, width, ev, reach) {
  * status: 'found' (score at or above the pattern's threshold), 'uncertain' (a weaker match, probably in the right place) or 'none'. The mask is the learned
  * letter shape placed at the match, so it follows the letters instead of a blob around them; it is empty unless the status is 'found'.
  */
+/**
+ * Every candidate copy of the pattern in a photo, best first, in the 400 px map's units: the normal search, and, when it finds nothing, a second look at twice
+ * the detail for small marks (see FINE_EDGE). Candidates carry `score`, `strength` and `fine` (found by the second look). CPU-heavy, so it runs on worker threads.
+ */
+export async function findInstances(rgba, width, height, tpl) {
+  const map = await evidenceMap(rgba, width, height)
+  let { instances } = await findInWorker(map, tpl) // every copy, best first: a bold header copy must not hide the faint one on the product
+  if (!instances.some((i) => isWatermark(i, tpl))) {
+    const fineMap = await evidenceMap(rgba, width, height, FINE_EDGE)
+    const fine = (await findInWorker(fineMap, tpl, { scales: FINE_SCALES })).instances
+    const back = WORK_EDGE / FINE_EDGE
+    instances = [...instances, ...fine.map((i) => ({ ...i, x: i.x * back, y: i.y * back, tw: i.tw * back, th: i.th * back, fine: true }))].sort((a, b) => b.score - a.score)
+  }
+  return { map, instances }
+}
+
 export async function findByTemplate(rgba, width, height, tpl) {
   const t0 = performance.now()
-  const map = await evidenceMap(rgba, width, height)
-  // Every copy of the mark, best first (a bold header copy must not hide the faint one on the product). CPU-heavy, so it runs on a worker thread.
-  const { instances } = await findInWorker(map, tpl)
+  const { map, instances } = await findInstances(rgba, width, height, tpl)
   const detectMs = performance.now() - t0
   const accepted = instances.filter((i) => isWatermark(i, tpl))
   const best = accepted[0] ?? instances[0] ?? null
