@@ -71,9 +71,13 @@ export function outputToAlpha(raw, count, kind) {
  * Cut the background out of one encoded image and return it encoded as `format` (default PNG) with the matte as its alpha channel, at the
  * source resolution. `infer(floatData, dims)` runs the model and resolves to { data: Float32Array, dims: number[] } for its last output.
  */
-export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90, beforeSegment, timings, refine = true } = {}) {
+export async function cutoutImage(input, spec, infer, { format = 'png', quality = 90, beforeSegment, timings, refine = true, maxEdge } = {}) {
   const lap = stopwatch(timings)
-  const { data: rgba, info } = await sharp(input, { failOn: 'none' }).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  // `maxEdge` caps the long side of the working (and output) image. It is applied while decoding, where a JPEG can be decoded at a fraction of its size
+  // (much cheaper than decoding in full and shrinking), and every later step (cleaning, edge work, encoding) then handles far fewer pixels.
+  const source = sharp(input, { failOn: 'none' }).rotate()
+  const decoded = maxEdge ? source.resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true }) : source
+  const { data: rgba, info } = await decoded.ensureAlpha().raw().toBuffer({ resolveWithObject: true })
   const { width, height } = info
   lap('decode')
   // Optional clean-up of the decoded pixels (e.g. watermark removal) so the model segments, and the output keeps, the cleaned image.

@@ -92,3 +92,16 @@ describe('edge refinement', () => {
     expect(edge[2]).toBeLessThan(60)
   })
 })
+
+describe('max edge', () => {
+  it('caps the long side while keeping the proportions, and never enlarges', async () => {
+    const src = await sharp({ create: { width: 200, height: 100, channels: 3, background: { r: 10, g: 20, b: 30 } } }).jpeg().toBuffer()
+    const infer = async () => ({ data: new Float32Array(1024 * 1024).fill(20), dims: [1, 1, 1024, 1024] })
+    const small = await cutout.cutoutImage(src, cutout.MODEL_SPECS['birefnet-lite'], infer, { maxEdge: 64 })
+    const meta = await sharp(small).metadata()
+    expect([meta.width, meta.height]).toEqual([64, 32])
+    const same = await cutout.cutoutImage(src, cutout.MODEL_SPECS['birefnet-lite'], infer, { maxEdge: 4000 })
+    const meta2 = await sharp(same).metadata()
+    expect([meta2.width, meta2.height]).toEqual([200, 100])
+  })
+})

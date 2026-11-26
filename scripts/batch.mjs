@@ -149,8 +149,13 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
+    process.exit(2)
+  }
+  const maxEdge = opts['max-edge'] === undefined ? undefined : Number(opts['max-edge'])
+  if (maxEdge !== undefined && !(Number.isInteger(maxEdge) && maxEdge >= 256 && maxEdge <= 16384)) {
+    console.error('--max-edge must be a whole number of pixels between 256 and 16384 (the longest side of the output), for example 2048.')
     process.exit(2)
   }
   let shard
@@ -271,7 +276,7 @@ async function main() {
       const { src, dest } = work[next++]
       try {
         const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
-        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings, refine: !opts['no-refine'] })
+        const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings, refine: !opts['no-refine'], maxEdge })
         fs.mkdirSync(path.dirname(dest), { recursive: true })
         fs.writeFileSync(`${dest}.part`, png)
         fs.renameSync(`${dest}.part`, dest) // never leaves a half-written file that a re-run would skip

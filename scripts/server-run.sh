@@ -15,6 +15,7 @@ MODEL="${MODEL:-birefnet}"      # birefnet (full, most precise) | birefnet-lite 
 JOBS="${JOBS:-4}"               # images in flight in each part
 SHARDS="${SHARDS:-2}"           # parts of the folder processed side by side by separate processes (full only)
 QUALITY="${QUALITY:-90}"        # WebP quality
+MAX_EDGE="${MAX_EDGE:-}"        # longest side of the output in pixels (empty = keep the original size; 2048 is much faster and fits Shopify)
 SAMPLES="${SAMPLES:-120}"       # photos the watermark pattern is learned from
 TEST_COUNT="${TEST_COUNT:-15}"
 
@@ -65,7 +66,7 @@ ensure_pattern() {
 batch() { # <input> <output> [extra batch options]
   local in="$1" out="$2"
   shift 2
-  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "$PATTERN" --jobs "$JOBS" "$@"
+  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "$PATTERN" --jobs "$JOBS" ${MAX_EDGE:+--max-edge "$MAX_EDGE"} "$@"
 }
 
 # Several parts of the folder at once: each part is its own process (its own main thread) and the parts share the one GPU server.
@@ -153,7 +154,8 @@ Usage: bash scripts/server-run.sh <command> [folder]
                           Finished files are skipped, so after an interruption run the same command again.
 
 Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (2 parts side by side),
-QUALITY (90), SAMPLES (120), TEST_COUNT (15). Example:  SHARDS=3 bash scripts/server-run.sh full ~/Brass
+QUALITY (90), MAX_EDGE (empty = original size; 2048 = faster), SAMPLES (120), TEST_COUNT (15).
+Example:  MAX_EDGE=2048 bash scripts/server-run.sh full ~/Brass
 EOF
     ;;
 esac
