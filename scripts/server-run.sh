@@ -13,7 +13,11 @@ LOG="${SERVER_LOG:-$HOME/server.log}"
 PATTERN="${WM_PATTERN:-$HOME/wm-pattern.json}"
 MODEL="${MODEL:-birefnet}"      # birefnet (full, most precise) | birefnet-lite | rmbg-1.4 | modnet
 JOBS="${JOBS:-4}"               # images in flight in each part
-SHARDS="${SHARDS:-2}"           # parts of the folder processed side by side by separate processes (full only)
+CORES="$(nproc)"
+DEFAULT_SHARDS=$((CORES / 4))     # one part per 4 cores, at least 2 and at most 8, so a bigger machine is used fully without tuning
+[ "$DEFAULT_SHARDS" -ge 2 ] || DEFAULT_SHARDS=2
+[ "$DEFAULT_SHARDS" -le 8 ] || DEFAULT_SHARDS=8
+SHARDS="${SHARDS:-$DEFAULT_SHARDS}"   # parts of the folder processed side by side by separate processes (full only)
 QUALITY="${QUALITY:-90}"        # WebP quality
 MAX_EDGE="${MAX_EDGE:-2048}"    # longest side of the output in pixels: 2048 is about 2x faster and fits Shopify (0 = keep the original size)
 SAMPLES="${SAMPLES:-120}"       # photos the watermark pattern is learned from
@@ -71,9 +75,8 @@ batch() { # <input> <output> [extra batch options]
 
 # Several parts of the folder at once: each part is its own process (its own main thread) and the parts share the one GPU server.
 run_parts() { # <input> <output>
-  local in="$1" out="$2" cores per i status=0
-  cores="$(nproc)"
-  per=$((cores / SHARDS))
+  local in="$1" out="$2" per i status=0
+  per=$((CORES / SHARDS))
   [ "$per" -ge 1 ] || per=1
   export WM_WORKERS="$per" # watermark-finder threads per part, so the parts together do not oversubscribe the cores
   local pids=()
@@ -153,7 +156,7 @@ Usage: bash scripts/server-run.sh <command> [folder]
   full   <folder> [out]   run every image in <folder>; results in [out] (default ~/out) and a zip next to it.
                           Finished files are skipped, so after an interruption run the same command again.
 
-Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (2 parts side by side),
+Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (parts side by side: one per 4 CPU cores, at least 2),
 QUALITY (90), MAX_EDGE (2048; 0 = original size), SAMPLES (120), TEST_COUNT (15).
 Example:  MAX_EDGE=0 bash scripts/server-run.sh full ~/Brass   (keep the original size)
 EOF
