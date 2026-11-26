@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import sharp from 'sharp'
 import { spawnSync } from 'node:child_process'
 import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
@@ -140,6 +141,21 @@ function zipFolder(dir, zipPath) {
   console.log(`Zip written: ${target} (${(fs.statSync(target).size / 1e9).toFixed(2)} GB)`)
 }
 
+/** The longest side of an image in pixels, from its header (no decoding). */
+async function longestSide(file) {
+  const m = await sharp(file).metadata()
+  return Math.max(m.width ?? 0, m.height ?? 0)
+}
+
+/** Writes an image to the output unchanged (re-encoded only when the output format differs from the file's own), never leaving a half-written file. */
+async function writeUnchanged(src, dest, format, quality) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
+  const same = path.extname(src).slice(1).toLowerCase().replace('jpeg', 'jpg') === path.extname(dest).slice(1).toLowerCase()
+  if (same) fs.copyFileSync(src, `${dest}.part`)
+  else fs.writeFileSync(`${dest}.part`, await sharp(fs.readFileSync(src)).toFormat(format, { quality }).toBuffer())
+  fs.renameSync(`${dest}.part`, dest)
+}
+
 /** " (name n, name m)" when more than one pattern found a watermark, else nothing. */
 function patternCounts(rows) {
   const counts = new Map()
@@ -155,7 +171,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json | folder | a,b,c> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--min-edge 300] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json | folder | a,b,c> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -164,6 +180,12 @@ async function main() {
     console.error('--max-edge must be a whole number of pixels between 256 and 16384 (the longest side of the output), for example 2048.')
     process.exit(2)
   }
+  const minEdge = Number(opts['min-edge'] ?? 0)
+  if (!(minEdge >= 0)) {
+    console.error('--min-edge must be a number of pixels: images whose longest side is smaller are copied unchanged (for example 300).')
+    process.exit(2)
+  }
+  let skippedSmall = 0
   let shard
   try {
     shard = parseShard(opts.shard)
@@ -302,6 +324,17 @@ async function main() {
     while (next < work.length && !fatal) {
       const { src, dest } = work[next++]
       try {
+        // Tiny images are not product photos (a 100 px "certificate" badge repeated on every product, a thumbnail): a watermark search and a background cut
+        // would only damage them, so they are copied through unchanged.
+        if (minEdge > 0 && (await longestSide(src)) < minEdge) {
+          await writeUnchanged(src, dest, opts.format, quality)
+          skippedSmall++
+          if (removeWatermarks) wmRows.push({ file: path.relative(inputDir, src), status: 'skipped-small', copies: 0, score: '0.00', pattern: '', x: '', y: '', width: '', height: '' })
+          done++
+          inARow = 0
+          lastProgress = performance.now()
+          continue
+        }
         const beforeSegment = removeWatermarks?.(path.relative(inputDir, src))
         const png = await cutoutImage(fs.readFileSync(src), spec, infer, { format: opts.format, quality, beforeSegment, timings, refine: !opts['no-refine'], maxEdge })
         fs.mkdirSync(path.dirname(dest), { recursive: true })
@@ -351,6 +384,7 @@ async function main() {
     const verdict = busy > 0.85 ? 'its main thread is the limit: run more parts side by side (SHARDS)' : used > 0.85 * cores ? 'the CPU is full: more parallelism will not help, only less work per image' : 'neither is full: more images in flight (--jobs) or more parts (SHARDS) should help'
     console.log(`This process used about ${used.toFixed(1)} of ${cores} CPU cores on average and its main thread was busy ${(100 * busy).toFixed(0)}% of the time: ${verdict}.`)
   }
+  if (skippedSmall > 0) console.log(`${skippedSmall} images with a longest side under ${minEdge} px were copied unchanged (they are not product photos).`)
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) {
     const by = (s) => wmRows.filter((r) => r.status === s).length

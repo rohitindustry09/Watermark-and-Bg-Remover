@@ -41,6 +41,10 @@ describe('mergeRows', () => {
 })
 
 describe('summarise', () => {
+  it('does not count tiny images that were copied through as misses', () => {
+    expect(summarise([row('badge.webp', 'skipped-small'), row('a.webp', 'found'), row('b.webp', 'none')])).toMatchObject({ total: 3, weak: 1, weakFiles: ['b.webp'] })
+  })
+
   it('counts only uncertain and none as needing a look, and handles names with commas', () => {
     const s = summarise([row('x, y/1.jpg', 'found'), row('x, y/2.jpg', 'colour-backup'), row('x, y/3.jpg', 'uncertain'), row('x, y/4.jpg', 'none')])
     expect(s).toMatchObject({ total: 4, confident: 2, weak: 2 })

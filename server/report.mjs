@@ -48,8 +48,8 @@ export function mergeRows(earlier, later) {
   return [...byFile.values()].sort((a, b) => String(a.file).localeCompare(String(b.file)))
 }
 
-/** How many images the pattern found a watermark in with confidence (found, or found by the colour backup), and how many it did not. */
+/** How many images the pattern found a watermark in with confidence (found, or found by the colour backup; copied-through tiny images are not counted as misses), and how many it did not. */
 export function summarise(rows) {
-  const weak = rows.filter((r) => r.status !== 'found' && r.status !== 'colour-backup')
+  const weak = rows.filter((r) => !['found', 'colour-backup', 'skipped-small'].includes(r.status))
   return { total: rows.length, confident: rows.length - weak.length, weak: weak.length, weakFiles: weak.map((r) => r.file) }
 }

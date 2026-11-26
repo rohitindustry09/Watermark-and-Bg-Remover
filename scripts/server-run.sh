@@ -24,6 +24,7 @@ DEFAULT_SHARDS=$((CORES / 4))     # one part per 4 cores, at least 2 and at most
 [ "$DEFAULT_SHARDS" -ge 2 ] || DEFAULT_SHARDS=2
 [ "$DEFAULT_SHARDS" -le 8 ] || DEFAULT_SHARDS=8
 SHARDS="${SHARDS:-$DEFAULT_SHARDS}"   # parts of the folder processed side by side by separate processes (full only)
+MIN_EDGE="${MIN_EDGE:-300}"      # images whose longest side is smaller than this are copied unchanged (tiny badges and thumbnails are not product photos); 0 = process everything
 QUALITY="${QUALITY:-90}"        # WebP quality
 MAX_EDGE="${MAX_EDGE:-2048}"    # longest side of the output in pixels: 2048 is about 2x faster and fits Shopify (0 = keep the original size)
 SAMPLES="${SAMPLES:-120}"       # photos the watermark pattern is learned from
@@ -97,7 +98,7 @@ ensure_pattern() {
 batch() { # <input> <output> [extra batch options]
   local in="$1" out="$2"
   shift 2
-  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "${PATTERN_SPEC:-$PATTERN,$ROOT/assets/patterns,$EXTRA_PATTERNS}" --server "$URL" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
+  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --min-edge "$MIN_EDGE" --remove-watermarks --wm-template "${PATTERN_SPEC:-$PATTERN,$ROOT/assets/patterns,$EXTRA_PATTERNS}" --server "$URL" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
 }
 
 # Several parts of the folder at once: each part is its own process (its own main thread) and the parts share the one GPU server.
@@ -242,7 +243,7 @@ Usage: bash scripts/server-run.sh <command> [folder]
                           ~/redo-results.zip with mask overlays to check by eye
 
 Settings (environment variables): MODEL (default birefnet), JOBS (4 images in flight per part), SHARDS (parts side by side: one per 4 CPU cores, at least 2),
-QUALITY (90), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (1), SAMPLES (120), TEST_COUNT (15).
+QUALITY (90), MIN_EDGE (300: smaller images are copied unchanged), MAX_EDGE (2048; 0 = original size), LAMA_SESSIONS (1), SAMPLES (120), TEST_COUNT (15).
 Example:  MAX_EDGE=0 bash scripts/server-run.sh full ~/Brass   (keep the original size)
 EOF
     ;;
