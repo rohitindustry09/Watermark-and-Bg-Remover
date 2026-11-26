@@ -23,14 +23,24 @@ echo "git, curl, zip and unzip are installed."
 
 say "Node.js 22"
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# nvm's own script is not written for bash's strict mode (unset variables, non-zero returns), so it is loaded with the checks switched off.
+load_nvm() {
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    set +eu
+    . "$NVM_DIR/nvm.sh"
+    set -eu
+  fi
+}
+load_nvm
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
   if [ ! -s "$NVM_DIR/nvm.sh" ]; then
     curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
   fi
-  . "$NVM_DIR/nvm.sh"
+  load_nvm
+  set +e
   nvm install 22
   nvm alias default 22 >/dev/null
+  set -e
 fi
 echo "node $(node -v), npm $(npm -v)"
 
@@ -38,14 +48,20 @@ say "CUDA 13 runtime and cuDNN 9 (needed for the GPU)"
 if ldconfig -p | grep -q 'libcublasLt.so.13' && ldconfig -p | grep -q 'libcudnn.so.9'; then
   echo "Already installed."
 else
-  if ! dpkg -s cuda-keyring >/dev/null 2>&1; then
+  # Add NVIDIA's package source only if apt cannot already see the CUDA packages (some images have it set up, and adding it twice makes apt complain).
+  if ! apt-cache policy cuda-libraries-13-0 2>/dev/null | grep -q 'Candidate: [0-9]'; then
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
     sudo dpkg -i /tmp/cuda-keyring.deb
     sudo apt-get update -qq
   fi
   sudo apt-get install -y cuda-libraries-13-0 libcudnn9-cuda-13
   sudo ldconfig
-  ldconfig -p | grep -q 'libcublasLt.so.13' && ldconfig -p | grep -q 'libcudnn.so.9' && echo "Installed."
+  if ldconfig -p | grep -q 'libcublasLt.so.13' && ldconfig -p | grep -q 'libcudnn.so.9'; then
+    echo "Installed."
+  else
+    echo "The CUDA 13 runtime or cuDNN 9 is still missing after the install; the GPU cannot be used. Stopping."
+    exit 1
+  fi
 fi
 
 say "The project"

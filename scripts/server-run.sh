@@ -5,7 +5,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  set +eu # nvm's own script is not written for bash's strict mode
+  . "$HOME/.nvm/nvm.sh"
+  set -eu
+fi
 
 PORT="${INFERENCE_PORT:-8787}"
 URL="http://127.0.0.1:$PORT"
@@ -48,6 +52,10 @@ stop_server() {
   pkill -f "server/index.mjs" 2>/dev/null && echo "Inference server stopped." || echo "No inference server was running."
 }
 
+need_zip() {
+  command -v zip >/dev/null 2>&1 || { echo "zip is not installed, so the results could not be packed at the end. Install it first:  sudo apt install -y zip"; exit 1; }
+}
+
 need_dir() {
   if [ -z "${1:-}" ] || [ ! -d "$1" ]; then
     echo "Give the folder of ORIGINAL photos (with the watermark and the background), for example:  $0 $2 ~/Brass"
@@ -70,7 +78,7 @@ ensure_pattern() {
 batch() { # <input> <output> [extra batch options]
   local in="$1" out="$2"
   shift 2
-  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "$PATTERN" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
+  npm run batch --silent -- "$in" "$out" --model "$MODEL" --format webp --quality "$QUALITY" --remove-watermarks --wm-template "$PATTERN" --server "$URL" --jobs "$JOBS" $([ "$MAX_EDGE" != "0" ] && printf -- "--max-edge %s" "$MAX_EDGE") "$@"
 }
 
 # Several parts of the folder at once: each part is its own process (its own main thread) and the parts share the one GPU server.
@@ -90,7 +98,7 @@ run_parts() { # <input> <output>
     sleep 20
     local line=""
     for i in $(seq 1 "$SHARDS"); do
-      line+=" | part $i: $(tr '\r' '\n' <"$HOME/part-$i.log" | grep -E ' done,' | tail -1 | sed 's/ *$//')"
+      line+=" | part $i: $(tr '\r' '\n' <"$HOME/part-$i.log" | grep -E ' done,' | tail -1 | sed 's/ *$//' || true)"
     done
     echo "$(date +%H:%M:%S)$line"
   done
@@ -115,6 +123,7 @@ case "${1:-help}" in
   learn) learn "${2:-}" ;;
   test)
     need_dir "${2:-}" test
+    need_zip
     start_server
     ensure_pattern "$2"
     rm -rf "$HOME/test-in" "$HOME/test-out" "$HOME/test-debug" "$HOME/test-results.zip"
@@ -123,7 +132,7 @@ case "${1:-help}" in
       cp "$f" "$HOME/test-in/$(basename "$(dirname "$f")" | cut -c1-24)-$(basename "$f")"
     done
     echo "Test images: $(ls "$HOME/test-in" | wc -l)"
-    batch "$HOME/test-in" "$HOME/test-out" --debug-masks "$HOME/test-debug"
+    batch "$HOME/test-in" "$HOME/test-out" --debug-masks "$HOME/test-debug" || echo "(some images failed: see the lines above. The results zip is still made.)"
     (cd "$HOME" && zip -qr test-results.zip test-out test-debug)
     echo
     echo "Results: $HOME/test-results.zip ($(du -h "$HOME/test-results.zip" | cut -f1)). Download it from your PC with:"
@@ -131,6 +140,7 @@ case "${1:-help}" in
     ;;
   full)
     need_dir "${2:-}" full
+    need_zip
     OUT="${3:-$HOME/out}"
     start_server
     ensure_pattern "$2"
