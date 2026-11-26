@@ -131,17 +131,12 @@ run_parts() { # <input> <output>
     echo "--- part $i"
     tr '\r' '\n' <"$HOME/part-$i.log" | grep -E 'Finished|failed:|Watermark removed|This process used' || true
   done
+  node scripts/merge-reports.mjs "$out" >/dev/null || true # keep what the parts reported so far, even for a stopped run
   if [ "$fatal" -eq 1 ]; then
     echo
     echo "THE RUN STOPPED because the GPU or the inference server stopped answering (see the STOPPED line above)."
     echo "If the GPU crashed: reboot the instance on the dashboard, log in again and run the same command again. Finished images are skipped."
     return 4
-  fi
-  # one report for the whole run
-  local reports=("$out"/watermark-report-part*.csv)
-  if [ -e "${reports[0]}" ]; then
-    { head -1 "${reports[0]}"; tail -q -n +2 "${reports[@]}" | sort; } >"$out/watermark-report.csv"
-    rm -f "${reports[@]}"
   fi
   return "$status"
 }
@@ -184,14 +179,11 @@ case "${1:-help}" in
       run_parts "$2" "$OUT" || rc=$?
       [ "$rc" -eq 4 ] && exit 4 # stopped on a dead GPU: no zip of a half-finished set
       [ "$rc" -eq 0 ] || echo "Some parts reported failed images: see ~/part-N.log (a re-run only redoes those)."
+      rm -f "${OUT%/}.zip" # zip would otherwise update an old archive and keep stale entries
       (cd "$OUT" && zip -0qr "${OUT%/}.zip" .)
     fi
-    if [ -s "$OUT/watermark-report.csv" ]; then
-      TOTAL=$(($(wc -l <"$OUT/watermark-report.csv") - 1))
-      WEAK=$(awk -F, 'NR > 1 && $2 != "found" && $2 != "colour-backup" { n++ } END { print n + 0 }' "$OUT/watermark-report.csv")
-      echo
-      echo "Watermark report: $WEAK of $TOTAL images had no confident watermark match (uncertain or none). They are listed in $OUT/watermark-report.csv: check those by eye."
-    fi
+    echo
+    node scripts/merge-reports.mjs "$OUT" || true # one report for the whole run, and how many images need a look
     echo
     echo "Finished in $(((SECONDS - STARTED) / 60)) min. Download ${OUT%/}.zip from your PC (scp), then stop or destroy the server so it stops billing."
     ;;

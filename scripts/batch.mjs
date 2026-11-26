@@ -10,6 +10,7 @@ import { cutoutImage, FORMATS, MODEL_SPECS } from '../server/cutout.mjs'
 import { decodeTensors, encodeTensors } from '../server/wire.mjs'
 import { findByTemplate, findWatermark, inpaintMasked, LAMA_SIZE, LAMA_URL, maskOverlay } from '../server/watermark.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
+import { mergeRows, parseCsv, toCsv } from '../server/report.mjs'
 import { parseShard, shardItems } from '../server/shard.mjs'
 import { parseTemplate } from '../server/wm-template.mjs'
 
@@ -118,13 +119,6 @@ function makeLama(run, session, timings) {
     const scale = max > 2 ? 1 / 255 : 1
     return Float32Array.from(data, (v) => Math.min(1, Math.max(0, v * scale)))
   }
-}
-
-function csvRows(rows) {
-  const cell = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replaceAll('"', '""')}"` : String(v))
-  const keys = Object.keys(rows[0])
-  const lines = [...rows].sort((a, b) => a.file.localeCompare(b.file)).map((r) => keys.map((k) => cell(r[k])).join(','))
-  return `${[keys.join(','), ...lines].join('\n')}\n`
 }
 
 /**
@@ -349,7 +343,12 @@ async function main() {
     if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by the pattern, ${by('colour-backup')} by the colour backup); ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.`)
     if (wmRows.length) {
       fs.mkdirSync(outputDir, { recursive: true })
-      fs.writeFileSync(path.join(outputDir, shard.count > 1 ? `watermark-report-part${shard.index}of${shard.count}.csv` : 'watermark-report.csv'), csvRows(wmRows))
+      {
+        // a resumed run only knows the images it processed itself: add them to the report that is already there
+        const target = path.join(outputDir, shard.count > 1 ? `watermark-report-part${shard.index}of${shard.count}.csv` : 'watermark-report.csv')
+        const earlier = fs.existsSync(target) ? parseCsv(fs.readFileSync(target, 'utf8')) : []
+        fs.writeFileSync(target, toCsv(mergeRows(earlier, wmRows)))
+      }
     }
   }
   for (const sid of [state.sid, lamaState?.sid]) if (sid) await fetch(`${opts.server}/api/release?sid=${sid}`, { method: 'POST' }).catch(() => undefined)
