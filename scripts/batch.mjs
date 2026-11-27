@@ -25,7 +25,7 @@ function parseArgs(argv) {
   const opts = { model: 'birefnet-lite', jobs: 6, precision: 'fp16', format: 'png', quality: 90, server: process.env.INFERENCE_URL ?? 'http://127.0.0.1:8787' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--remove-watermarks' || a === '--wm-double-check' || a === '--no-refine' || a === '--allow-cpu' || a === '--no-logo') opts[a.slice(2)] = true
+    if (a === '--remove-watermarks' || a === '--wm-double-check' || a === '--no-refine' || a === '--allow-cpu' || a === '--no-logo' || a === '--no-second-look') opts[a.slice(2)] = true
     else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i]
     else positional.push(a)
   }
@@ -174,7 +174,7 @@ async function main() {
   if (!inputDir || !outputDir || !spec || !format || !(quality >= 1 && quality <= 100)) {
     console.error(
       `Usage: npm run batch -- <inputDir> <outputDir> [--model ${Object.keys(MODEL_SPECS).join('|')}] [--format ${Object.keys(FORMATS).join('|')}] ` +
-        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--min-edge 300] [--no-logo] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json | folder | a,b,c> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
+        '[--quality 90] [--zip <file.zip>] [--max-edge 2048] [--min-edge 300] [--no-logo] [--no-second-look] [--no-refine] [--allow-cpu] [--shard 1/2] [--remove-watermarks] [--wm-template <pattern.json | folder | a,b,c> [--wm-double-check]] [--debug-masks <dir>] [--jobs 6] [--precision fp16|fp32]',
     )
     process.exit(2)
   }
@@ -248,7 +248,7 @@ async function main() {
   // Watermark removal: LaMa fills what the colour detector marks, before the background is removed.
   let removeWatermarks
   let lamaState
-  const wmStats = { withMark: 0, checked: 0, logos: 0 }
+  const wmStats = { withMark: 0, checked: 0, logos: 0, secondLook: 0 }
   const wmRows = [] // one row per image for watermark-report.csv
   const timings = {} // wall-clock ms per stage, summed over images; the images in flight overlap, so this shows proportions, not a total
   if (opts['remove-watermarks'] || opts['wm-template']) {
@@ -289,6 +289,15 @@ async function main() {
       return found
     }
 
+    /** The patterns only (no colour backup, no tiny matches): what they still find in an image that was just cleaned is a leftover. */
+    const leftovers = async (rgba, width, height) => {
+      for (const p of patterns) {
+        const again = await findByTemplate(rgba, width, height, p.tpl)
+        if (again.status === 'found' && !again.fineOnly) return again
+      }
+      return null
+    }
+
     removeWatermarks = (relPath) => async ({ rgba, width, height }) => {
       const t0 = performance.now()
       const found = await findMarks(rgba, width, height)
@@ -297,7 +306,7 @@ async function main() {
       timings.detectCompute = (timings.detectCompute ?? 0) + found.detectMs
       wmStats.checked++
       const box = found.tight?.[0]
-      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', copies: found.marks, score: found.score.toFixed(2), pattern: found.marks > 0 ? (found.pattern ?? '') : '', logo: logo ? 'yes' : '', x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
+      wmRows.push({ file: relPath, status: found.marks > 0 ? found.status : found.status === 'uncertain' ? 'uncertain' : 'none', copies: found.marks, score: found.score.toFixed(2), pattern: found.marks > 0 ? (found.pattern ?? '') : '', logo: logo ? 'yes' : '', second: '', x: box?.[0] ?? '', y: box?.[1] ?? '', width: box ? box[2] - box[0] : '', height: box ? box[3] - box[1] : '' })
       if (found.marks === 0 && !logo) return
       if (found.marks > 0) wmStats.withMark++
       if (logo) wmStats.logos++
@@ -310,6 +319,19 @@ async function main() {
       const t1 = performance.now()
       if (found.marks > 0) await inpaintMasked(rgba, width, height, found.mask, found.boxes, lama)
       if (logo) await inpaintMasked(rgba, width, height, logo.mask, [logo.box], lama)
+      let rounds = 0
+      if (!opts['no-second-look'] && pattern && found.marks > 0) {
+        for (; rounds < 2; rounds++) {
+          const left = await leftovers(rgba, width, height)
+          if (!left) break
+          await inpaintMasked(rgba, width, height, left.mask, left.boxes, lama)
+        }
+        if (rounds > 0) {
+          wmStats.secondLook++
+          const row = wmRows.find((r) => r.file === relPath)
+          if (row) row.second = rounds
+        }
+      }
       timings.fill = (timings.fill ?? 0) + performance.now() - t1
     }
   }
@@ -406,7 +428,7 @@ async function main() {
   if (removeWatermarks) await closeWatermarkPool()
   if (removeWatermarks) {
     const by = (s) => wmRows.filter((r) => r.status === s).length
-    if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by a pattern${patternCounts(wmRows)}, ${by('colour-backup')} by the colour backup); ${by('small-match')} small matches (removed, but check them), ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.${wmStats.logos > 0 ? ` The corner logo was removed on ${wmStats.logos} images.` : ''}`)
+    if (!fatal) console.log(`Watermark removed on ${wmStats.withMark} of ${wmStats.checked} images (${by('found')} by a pattern${patternCounts(wmRows)}, ${by('colour-backup')} by the colour backup); ${by('small-match')} small matches (removed, but check them), ${by('uncertain')} uncertain and ${by('none')} with none found are listed in watermark-report.csv for review.${wmStats.logos > 0 ? ` The corner logo was removed on ${wmStats.logos} images.` : ''}${wmStats.secondLook > 0 ? ` A second look found and removed leftovers on ${wmStats.secondLook} images.` : ''}`)
     if (wmRows.length) {
       fs.mkdirSync(outputDir, { recursive: true })
       {

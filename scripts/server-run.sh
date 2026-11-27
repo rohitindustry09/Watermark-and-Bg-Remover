@@ -148,6 +148,12 @@ case "${1:-help}" in
   stop) stop_server ;;
   status) healthy && curl -s "$URL/api/health" && echo || echo "The inference server is not running." ;;
   learn) learn "${2:-}" ;;
+  audit)
+    # the last eye: checks every FINISHED image of a folder for lettering that is still there (no originals, no GPU needed)
+    [ -d "${2:-}" ] || { echo "Give the folder of finished images, for example:  $0 audit ~/out-media"; exit 2; }
+    AUDIT_DIR="${3:-${2%/}-audit}"
+    node scripts/audit.mjs "$2" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --jobs "$((CORES < 8 ? CORES : 8))"
+    ;;
   learn-more)
     need_dir "${2:-}" learn-more
     [ -n "${3:-}" ] || { echo "Give the new pattern a name, for example:  $0 learn-more ~/Faint faint"; exit 2; }
@@ -197,6 +203,12 @@ case "${1:-help}" in
     echo
     node scripts/merge-reports.mjs "$OUT" || true # one report for the whole run, and how many images need a look
     echo
+    if [ "${AUDIT:-1}" = 1 ]; then
+      echo
+      echo "Last eye: checking every finished image for leftover lettering (AUDIT=0 skips this)."
+      AUDIT_DIR="${OUT%/}-audit"
+      node scripts/audit.mjs "$OUT" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --jobs "$((CORES < 8 ? CORES : 8))" || echo "(the audit failed: the finished images are not affected)"
+    fi
     echo "Finished in $(((SECONDS - STARTED) / 60)) min. Download ${OUT%/}.zip from your PC (scp), then stop or destroy the server so it stops billing."
     ;;
   redo)
@@ -236,6 +248,8 @@ Usage: bash scripts/server-run.sh <command> [folder]
   learn-more <folder> <name>   learn an EXTRA pattern (e.g. for a faint or different look of the watermark) into ~/wm-patterns/<name>.json; the finder tries
                    the main pattern first and then every extra one in name order, and the report says which pattern matched each image
   patterns         list the patterns that will be tried
+  audit  <out>     the last eye: check every finished image of <out> for lettering still found; writes <out>-audit/audit-report.csv and contact sheets
+                   of the leftovers (full runs it at the end unless AUDIT=0)
   test   <folder>  run a 15-image test: learns the pattern if needed, writes ~/test-results.zip to download and check
   full   <folder> [out]   run every image in <folder>; results in [out] (default ~/out) and a zip next to it.
                           Finished files are skipped, so after an interruption run the same command again.
