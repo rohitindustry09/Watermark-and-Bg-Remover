@@ -39,7 +39,7 @@ class Stream(IterableDataset):
 
 
 def loss_fn(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    bce = nn.functional.binary_cross_entropy_with_logits(logits, target, pos_weight=torch.tensor(6.0))
+    bce = nn.functional.binary_cross_entropy_with_logits(logits, target, pos_weight=torch.tensor(6.0, device=logits.device))
     p = torch.sigmoid(logits)
     inter = (p * target).sum(dim=(1, 2, 3))
     dice = 1 - (2 * inter + 1) / (p.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3)) + 1)
@@ -49,11 +49,13 @@ def loss_fn(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def validate(model: nn.Module, loader: DataLoader, batches: int) -> dict[str, float]:
     model.eval()
+    dev = next(model.parameters()).device
     tp = fp = fn = 0.0
     empty_pics = empty_hits = 0
     for i, (x, y) in enumerate(loader):
         if i >= batches:
             break
+        x, y = x.to(dev), y.to(dev)
         pred = (model(x) > 0).float()
         tp += (pred * y).sum().item()
         fp += (pred * (1 - y)).sum().item()
@@ -90,7 +92,9 @@ def main() -> None:
     train_dl = DataLoader(Stream(str(cache), 0, split, 1), batch_size=args.batch, num_workers=args.workers, persistent_workers=True, prefetch_factor=4)
     val_dl = DataLoader(Stream(str(cache), split, n, 7, p_mark=0.5), batch_size=args.batch, num_workers=2)
 
-    model = TinyUNet()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = TinyUNet().to(device)
+    print("device:", device, flush=True)
     print("parameters:", sum(p.numel() for p in model.parameters()), flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=3e-3, total_steps=args.steps, pct_start=0.1)
@@ -99,6 +103,7 @@ def main() -> None:
     it = iter(train_dl)
     for step in range(1, args.steps + 1):
         x, y = next(it)
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         loss = loss_fn(model(x), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -110,7 +115,7 @@ def main() -> None:
         if step % 500 == 0 or step == args.steps:
             m = validate(model, val_dl, 20)
             print(f"  validation: IoU {m['iou']:.3f}  recall {m['recall']:.3f}  precision {m['precision']:.3f}  pictures without a mark that get one drawn: {m['false_pictures']:.3f}", flush=True)
-            torch.save(model.state_dict(), args.out)
+            torch.save({k: v.cpu() for k, v in model.state_dict().items()}, args.out)
     print("done", args.out, f"{(time.time() - started) / 60:.1f} min", flush=True)
 
 
