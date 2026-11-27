@@ -3,6 +3,7 @@
 import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
 import { detectInWorker, findInWorker } from './wm-pool.mjs'
+import { onRedSurface } from './context.mjs'
 import { evidenceMap, FINE_EDGE, FINE_SCALES, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
 
 export const LAMA_SIZE = 512
@@ -155,7 +156,11 @@ export async function findByTemplate(rgba, width, height, tpl) {
   const t0 = performance.now()
   const { map, instances } = await findInstances(rgba, width, height, tpl)
   const detectMs = performance.now() - t0
-  const accepted = instances.filter((i) => isWatermark(i, tpl))
+  // A match accepted only by the soft rule (score under the usual threshold) must not lie on a red or orange part of the statue: there the edges of the coloured
+  // areas look like letters. (A match at the usual score is accepted as before.)
+  const upToPhoto = Math.max(width, height) / WORK_EDGE
+  const onRed = (i) => onRedSurface(rgba, width, height, [i.x * upToPhoto, i.y * upToPhoto, (i.x + i.tw) * upToPhoto, (i.y + i.th) * upToPhoto])
+  const accepted = instances.filter((i) => isWatermark(i, tpl) && (i.score >= tpl.threshold || !onRed(i)))
   const best = accepted[0] ?? instances[0] ?? null
   const score = Math.max(0, best?.score ?? 0)
   const status = accepted.length > 0 ? 'found' : best ? 'uncertain' : 'none'

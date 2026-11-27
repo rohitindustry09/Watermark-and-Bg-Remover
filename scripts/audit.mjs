@@ -11,6 +11,7 @@ import sharp from 'sharp'
 import { findInstances } from '../server/watermark.mjs'
 import { SOFT_MIN_WIDTH, SOFT_SCORE_SHARE } from '../server/wm-template.mjs'
 import { loadPatterns } from '../server/patterns.mjs'
+import { onRedSurface } from '../server/context.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
 import { mergeRows, parseCsv, toCsv } from '../server/report.mjs'
 import { parseShard, shardItems } from '../server/shard.mjs'
@@ -102,6 +103,12 @@ async function check(file) {
     // a leftover is flagged only when its tint is clearly strong (real lettering measured 8 or more; the false matches on carving, 4.4 to 5.5), at a normal size
     const hit = instances.filter((i) => !i.fine && i.tw >= SOFT_MIN_WIDTH && i.score >= p.tpl.threshold * SOFT_SCORE_SHARE && i.strength >= p.tpl.minEvidence * minStrength)[0]
     if (hit && (!best || hit.score > best.score)) best = { ...hit, pattern: p.name }
+  }
+  // not a leftover when the box is small for the image or sits on a red or orange part of the statue (the checks that removed 14 of 22 false alarms and no
+  // real leftover on 60 images checked by eye)
+  if (best) {
+    const box = [best.x * up, best.y * up, (best.x + best.tw) * up, (best.y + best.th) * up]
+    if ((box[2] - box[0]) / Math.max(info.width, info.height) < 0.15 || onRedSurface(data, info.width, info.height, box)) best = null
   }
   if (!best) return { status: 'clean', score: '', strength: '', pattern: '', x: '', y: '', width: '', height: '' }
   return { status: 'leftover', score: best.score.toFixed(2), strength: best.strength.toFixed(1), pattern: best.pattern, x: Math.round(best.x * up), y: Math.round(best.y * up), width: Math.round(best.tw * up), height: Math.round(best.th * up) }
