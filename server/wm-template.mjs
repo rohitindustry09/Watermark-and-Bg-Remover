@@ -340,7 +340,13 @@ export function meanEvidence(map, tpl, m) {
  * Every instance of the pattern in the map, best first, up to \`max\`: after each find its surroundings are blanked and the search repeats. A photo can
  * hold the mark twice (the faint one on the product and a bold copy in a header), and the bold one must not hide the faint one.
  */
-export function findAll(map, tpl, { max = 3, scales } = {}) {
+/**
+ * How many instances a search looks for. Three was too few: small false matches (which correlate with almost any blob) took the slots before a faint real
+ * mark, so the real one was never reported. On 38 real marks that were left behind, covering went from 27 to 37 with six.
+ */
+export const MAX_INSTANCES = 6
+
+export function findAll(map, tpl, { max = MAX_INSTANCES, scales } = {}) {
   const E = new Float32Array(map.E)
   const out = []
   for (let k = 0; k < max; k++) {

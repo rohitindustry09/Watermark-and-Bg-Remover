@@ -9,7 +9,7 @@ parentPort.on('message', ({ id, task, ...job }) => {
   try {
     const t0 = performance.now()
     if (task === 'find') {
-      const instances = findAll({ E: job.E, w: job.w, h: job.h }, job.tpl, { scales: job.scales })
+      const instances = findAll({ E: job.E, w: job.w, h: job.h }, job.tpl, { scales: job.scales, max: job.max })
       parentPort.postMessage({ id, result: { instances, ms: performance.now() - t0 } })
     } else {
       const marks = detectChromaText(new Uint8ClampedArray(job.pixels), job.width, job.height)
