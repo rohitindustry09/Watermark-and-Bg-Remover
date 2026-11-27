@@ -154,6 +154,26 @@ case "${1:-help}" in
     AUDIT_DIR="${3:-${2%/}-audit}"
     node scripts/audit.mjs "$2" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --parts "${AUDIT_PARTS:-4}"
     ;;
+  fix)
+    # after an audit: re-run only the leftover images from their ORIGINALS with the current pipeline, audit the results, and replace the old files only
+    # with those that now come out clean
+    need_dir "${2:-}" fix
+    need_zip
+    OUT="${3:-$HOME/out-media}"
+    AUDIT_REPORT="${OUT%/}-audit/audit-report.csv"
+    [ -s "$AUDIT_REPORT" ] || { echo "No $AUDIT_REPORT: run the audit first:  $0 audit $OUT"; exit 2; }
+    start_server
+    ensure_pattern "$2"
+    rm -rf "$HOME/fix-in" "$HOME/fix-out" "$HOME/fix-audit"
+    node scripts/fix-list.mjs "$AUDIT_REPORT" "$2" "$HOME/fix-in" || echo "(some originals were not found: they stay as they are)"
+    [ -n "$(ls -A "$HOME/fix-in" 2>/dev/null)" ] || { echo "Nothing to fix."; exit 0; }
+    batch "$HOME/fix-in" "$HOME/fix-out" || echo "(some images failed: see the lines above)"
+    node scripts/audit.mjs "$HOME/fix-out" --report "$HOME/fix-audit/audit-report.csv" --sheets "$HOME/fix-audit" --parts 2
+    node scripts/fix-merge.mjs "$HOME/fix-out" "$HOME/fix-audit/audit-report.csv" "$OUT"
+    rm -f "${OUT%/}.zip"
+    (cd "$OUT" && zip -0qr "${OUT%/}.zip" .)
+    echo "Rebuilt ${OUT%/}.zip. Re-check everything with:  $0 audit $OUT"
+    ;;
   learn-more)
     need_dir "${2:-}" learn-more
     [ -n "${3:-}" ] || { echo "Give the new pattern a name, for example:  $0 learn-more ~/Faint faint"; exit 2; }
@@ -247,6 +267,8 @@ Usage: bash scripts/server-run.sh <command> [folder]
                    "Dharma Statues" watermark: its pattern ships with the project and is used automatically.
   learn-more <folder> <name>   learn an EXTRA pattern (e.g. for a faint or different look of the watermark) into ~/wm-patterns/<name>.json; the finder tries
                    the main pattern first and then every extra one in name order, and the report says which pattern matched each image
+  fix    <originals> [out]   after an audit: re-run only the leftover images from their originals, audit them, and replace the old files only with
+                   the ones that now come out clean; rebuilds <out>.zip
   patterns         list the patterns that will be tried
   audit  <out>     the last eye: check every finished image of <out> for lettering still found; writes <out>-audit/audit-report.csv and contact sheets
                    of the leftovers (full runs it at the end unless AUDIT=0)
