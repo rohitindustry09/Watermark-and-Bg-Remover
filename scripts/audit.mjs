@@ -1,16 +1,19 @@
 // The last eye: goes through every FINISHED image of an output folder (any order) and reports the ones where watermark lettering can still be found.
-//   node scripts/audit.mjs <outDir> [--patterns <file|folder|a,b>] [--sheets <dir>] [--report <file.csv>] [--jobs 4] [--min-strength 1.6]
+//   node scripts/audit.mjs <outDir> [--patterns <file|folder|a,b>] [--sheets <dir>] [--report <file.csv>] [--parts 4] [--jobs 4] [--min-strength 1.6]
 // Each image is flattened on white and searched with the learned patterns; a clearly tinted match counts even a little under the usual score. It writes <outDir>/audit-report.csv (every image: clean or leftover, score, strength, box) and, with --sheets, contact sheets of the leftovers so
 // they can be checked by eye. It reads only the finished files: no originals and no GPU are needed.
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 import { findInstances } from '../server/watermark.mjs'
 import { SOFT_MIN_WIDTH, SOFT_SCORE_SHARE } from '../server/wm-template.mjs'
 import { loadPatterns } from '../server/patterns.mjs'
 import { closeWatermarkPool } from '../server/wm-pool.mjs'
-import { toCsv } from '../server/report.mjs'
+import { mergeRows, parseCsv, toCsv } from '../server/report.mjs'
+import { parseShard, shardItems } from '../server/shard.mjs'
 
 const IMAGE_EXT = /\.(png|webp|jpe?g|avif)$/i
 function* walk(dir) {
@@ -25,10 +28,55 @@ const args = process.argv.slice(2)
 const opt = (n, d) => (args.includes(`--${n}`) ? args[args.indexOf(`--${n}`) + 1] : d)
 const dir = args.find((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--'))
 if (!dir || !fs.existsSync(dir)) {
-  console.error('Usage: node scripts/audit.mjs <outDir> [--patterns <file|folder|a,b>] [--sheets <dir>] [--jobs 4]')
+  console.error('Usage: node scripts/audit.mjs <outDir> [--patterns <file|folder|a,b>] [--sheets <dir>] [--parts 4] [--jobs 4]')
   process.exit(2)
 }
-const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+const here = path.dirname(fileURLToPath(import.meta.url))
+const parts = Number(opt('parts', 1))
+if (parts > 1 && !args.includes('--shard')) {
+  // Several processes, each with its own main thread and its own share of the images: one process leaves most of the cores idle.
+  const reportFile = opt('report', path.join(dir, 'audit-report.csv'))
+  const sheets = opt('sheets', null)
+  const perWorkers = Math.max(1, Math.floor(os.availableParallelism() / parts))
+  const progress = Array.from({ length: parts }, () => ({ done: 0, total: 0, bad: 0 }))
+  const partFiles = []
+  const kids = []
+  for (let i = 1; i <= parts; i++) {
+    const part = `${reportFile.replace(/\.csv$/i, '')}-part${i}.csv`
+    partFiles.push(part)
+    const childArgs = [fileURLToPath(import.meta.url), dir, '--shard', `${i}/${parts}`, '--report', part, '--jobs', String(Math.min(4, perWorkers)), '--min-strength', String(opt('min-strength', 1.6))]
+    if (args.includes('--patterns')) childArgs.push('--patterns', opt('patterns', ''))
+    if (sheets) childArgs.push('--sheets', sheets, '--sheet-prefix', `p${i}-`)
+    const child = spawn(process.execPath, childArgs, { env: { ...process.env, WM_WORKERS: String(perWorkers) }, stdio: ['ignore', 'pipe', 'inherit'] })
+    child.stdout.on('data', (chunk) => {
+      const text = String(chunk)
+      const total = /(\d+) finished images to check/.exec(text)
+      if (total) progress[i - 1].total = Number(total[1])
+      const m = [...text.matchAll(/(\d+)\/(\d+) checked, (\d+) with leftovers/g)].at(-1)
+      if (m) progress[i - 1] = { done: Number(m[1]), total: Number(m[2]), bad: Number(m[3]) }
+    })
+    kids.push(new Promise((resolve) => child.on('close', resolve)))
+  }
+  const show = setInterval(() => {
+    const sum = (k) => progress.reduce((a, p) => a + p[k], 0)
+    process.stdout.write(`\r${sum('done')}/${sum('total') || '?'} checked, ${sum('bad')} with leftovers (${parts} parts)   `)
+  }, 3000)
+  const codes = await Promise.all(kids)
+  clearInterval(show)
+  let rows = []
+  for (const f of partFiles) {
+    if (!fs.existsSync(f)) continue
+    rows = mergeRows(rows, parseCsv(fs.readFileSync(f, 'utf8')))
+    fs.rmSync(f, { force: true })
+  }
+  fs.mkdirSync(path.dirname(reportFile), { recursive: true })
+  fs.writeFileSync(reportFile, toCsv(rows))
+  const count = (st) => rows.filter((r) => r.status === st).length
+  console.log(`\n${rows.length} images: ${count('clean')} clean, ${count('leftover')} with lettering still found, ${count('skipped-small')} too small to check, ${count('error')} errors.`)
+  console.log(`Written ${reportFile}`)
+  if (sheets && count('leftover') > 0) console.log(`Contact sheets of the leftovers (red box = where lettering is still found): ${sheets}`)
+  process.exit(codes.some((c) => c !== 0) ? 1 : 0)
+}
 const patterns = loadPatterns(opt('patterns', `${path.join(here, '..', 'assets', 'wm-pattern.json')},${path.join(here, '..', 'assets', 'patterns')},${process.env.HOME ?? ''}/wm-patterns`))
 if (patterns.length === 0) {
   console.error('No watermark pattern found.')
@@ -37,8 +85,9 @@ if (patterns.length === 0) {
 const sheetsDir = opt('sheets', null)
 const minStrength = Number(opt('min-strength', 1.6)) // times the pattern's minimum tint strength
 const jobs = Math.max(1, Number(opt('jobs', Math.min(4, os.availableParallelism()))))
-const files = [...walk(dir)].filter((f) => !/audit-sheet/.test(f)).sort()
-console.log(`${files.length} finished images to check with ${patterns.length} pattern(s).`)
+const shard = parseShard(opt('shard', '1/1'))
+const files = shardItems([...walk(dir)].filter((f) => !/audit-sheet/.test(f)).sort(), shard.index, shard.count)
+console.log(`${files.length} finished images to check with ${patterns.length} pattern(s).`) // a parts-run's parent reads this line for its progress
 
 async function check(file) {
   const meta = await sharp(file).metadata()
@@ -112,7 +161,7 @@ if (sheetsDir && count('leftover') > 0) {
     await sharp({ create: { width: cols * (T + 4), height: Math.ceil(tiles.length / cols) * (H + 4), channels: 3, background: '#222' } })
       .composite(tiles.map((t, i) => ({ input: t, left: (i % cols) * (T + 4), top: Math.floor(i / cols) * (H + 4) })))
       .jpeg({ quality: 85 })
-      .toFile(path.join(sheetsDir, `audit-sheet-${String(s + 1).padStart(2, '0')}.jpg`))
+      .toFile(path.join(sheetsDir, `audit-sheet-${opt('sheet-prefix', '')}${String(s + 1).padStart(2, '0')}.jpg`))
   }
   console.log(`Contact sheets of the ${bad.length} leftovers (red box = where lettering is still found): ${sheetsDir}`)
 }

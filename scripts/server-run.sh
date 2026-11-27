@@ -152,7 +152,7 @@ case "${1:-help}" in
     # the last eye: checks every FINISHED image of a folder for lettering that is still there (no originals, no GPU needed)
     [ -d "${2:-}" ] || { echo "Give the folder of finished images, for example:  $0 audit ~/out-media"; exit 2; }
     AUDIT_DIR="${3:-${2%/}-audit}"
-    node scripts/audit.mjs "$2" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --jobs "$((CORES < 8 ? CORES : 8))"
+    node scripts/audit.mjs "$2" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --parts "${AUDIT_PARTS:-4}"
     ;;
   learn-more)
     need_dir "${2:-}" learn-more
@@ -207,7 +207,7 @@ case "${1:-help}" in
       echo
       echo "Last eye: checking every finished image for leftover lettering (AUDIT=0 skips this)."
       AUDIT_DIR="${OUT%/}-audit"
-      node scripts/audit.mjs "$OUT" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --jobs "$((CORES < 8 ? CORES : 8))" || echo "(the audit failed: the finished images are not affected)"
+      node scripts/audit.mjs "$OUT" --report "$AUDIT_DIR/audit-report.csv" --sheets "$AUDIT_DIR" --parts "${AUDIT_PARTS:-4}" || echo "(the audit failed: the finished images are not affected)"
     fi
     echo "Finished in $(((SECONDS - STARTED) / 60)) min. Download ${OUT%/}.zip from your PC (scp), then stop or destroy the server so it stops billing."
     ;;
