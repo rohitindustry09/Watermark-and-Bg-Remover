@@ -75,6 +75,9 @@ npm run batch -- <inputDir> <outputDir> [--model birefnet|birefnet-lite|rmbg-1.4
   `colour-backup`, `none`). Weak matches fall back to the colour detector; `--wm-double-check` also runs it on images where the pattern found nothing.
   Learn from the original photos, not cutouts (a cutout cuts the watermark off where the background was).
 
+**Corner logo.** The Sri Yantra logo in the top-left corner never moves, so it has its own small learned pattern (`assets/logo-pattern.json`, learned with
+`node scripts/learn-logo.mjs <folder>`), searched only in that corner and removed like the lettering (`--no-logo` turns it off; the report has a `logo` column).
+
 **Several patterns.** The finder can hold a library of patterns and tries them in order, stopping at the first that finds the watermark: the main one
 (`assets/wm-pattern.json`), then `assets/patterns/*.json`, then your own in `~/wm-patterns` (`server-run.sh learn-more <folder> <name>` adds one; `patterns` lists them).
 The report has a `pattern` column saying which one matched. A new pattern must be learned from images that really carry the mark (it cannot be made from the

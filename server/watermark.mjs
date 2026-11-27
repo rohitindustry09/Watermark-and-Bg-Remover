@@ -200,7 +200,8 @@ export async function findByTemplate(rgba, width, height, tpl) {
     tight.push([Math.round(x0 * k), Math.round(y0 * k), Math.round((x0 + tw) * k + reach), Math.round((y0 + th) * k)])
   }
   const boxes = tight.map((box) => box.map((v, i) => v + (i < 2 ? -8 : 8)))
-  return { mask: plane, boxes, tight, marks: accepted.length, score, status, detectMs, match: { x: accepted[0].x, y: accepted[0].y, tw: accepted[0].tw, th: accepted[0].th } }
+  const fineOnly = accepted.every((i) => i.fine) // found only by the second, finer look: small and less trustworthy
+  return { mask: plane, boxes, tight, marks: accepted.length, score, status, fineOnly, detectMs, match: { x: accepted[0].x, y: accepted[0].y, tw: accepted[0].tw, th: accepted[0].th } }
 }
 
 /** Square crop window of at least LAMA_SIZE px (the native resolution, so strokes are not blurred), centred on the box and kept inside the image. */

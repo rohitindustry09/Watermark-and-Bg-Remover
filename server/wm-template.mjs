@@ -109,6 +109,42 @@ function integrals(E, w, h) {
 }
 
 /** Best normalised cross-correlation of the standardised template over positions [xa..xb] x [ya..yb] of the map. */
+/**
+ * The best few places for a template, not only the single best: a window is scored everywhere, positions are grouped in cells about as big as the
+ * template, and the best of each cell is kept (the top `keep` cells). A noisy spot that scores a little higher than the real mark at one size no longer hides it.
+ */
+function topIn(map, I, tpl, tw, th, xa, xb, ya, yb, step, minMean, keep) {
+  const { E, w, h } = map
+  const N = tw * th
+  const x0 = Math.max(0, xa)
+  const x1 = Math.min(w - tw, xb)
+  const y0 = Math.max(0, ya)
+  const y1 = Math.min(h - th, yb)
+  const cellW = Math.max(2, Math.round(tw * 0.6))
+  const cellH = Math.max(2, Math.round(th * 1.5))
+  const cells = new Map()
+  for (let y = y0; y <= y1; y += step) {
+    for (let x = x0; x <= x1; x += step) {
+      const rect = (A) => A[(y + th) * (w + 1) + x + tw] - A[y * (w + 1) + x + tw] - A[(y + th) * (w + 1) + x] + A[y * (w + 1) + x]
+      const s1 = rect(I.I1)
+      if (s1 / N < minMean) continue
+      const varE = rect(I.I2) - (s1 * s1) / N
+      if (varE < 1e-3) continue
+      let dot = 0
+      for (let ty = 0; ty < th; ty++) {
+        const eo = (y + ty) * w + x
+        const to = ty * tw
+        for (let tx = 0; tx < tw; tx++) dot += tpl.T0[to + tx] * E[eo + tx]
+      }
+      const score = dot / Math.sqrt(varE * tpl.energy)
+      const key = Math.floor(x / cellW) * 100003 + Math.floor(y / cellH)
+      const cur = cells.get(key)
+      if (!cur || score > cur.score) cells.set(key, { score, x, y })
+    }
+  }
+  return [...cells.values()].sort((a, b) => b.score - a.score).slice(0, keep)
+}
+
 function bestIn(map, I, tpl, tw, th, xa, xb, ya, yb, step = 1, minMean = 0) {
   const { E, w, h } = map
   const N = tw * th
@@ -163,6 +199,10 @@ export function searchScales(tpl) {
   return [...smaller, ...learned]
 }
 
+/** Places kept per size by the coarse search, and how many of each size's best are refined at full resolution. */
+const PER_SIZE = 4
+const REFINE_PER_SIZE = 2
+
 /**
  * Finds the learned pattern in an evidence map: a coarse search at half size over every scale, then a fine search around the best candidates.
  * `region` ([x0,y0,x1,y1] fractions of the map) limits where the pattern may start; the default is the whole map.
@@ -180,13 +220,15 @@ export function matchTemplate(map, tpl, { region, scales, minMean } = {}) {
   for (const s of list) {
     const t = templateAt(tpl, s, 2)
     if (t.tw >= coarse.w || t.th >= coarse.h) continue
-    const m = bestIn(coarse, cI, t, t.tw, t.th, Math.floor(reg[0] * coarse.w) - 1, Math.ceil(reg[2] * coarse.w), Math.floor(reg[1] * coarse.h) - 1, Math.ceil(reg[3] * coarse.h), 1, floor)
-    cands.push({ ...m, s })
+    for (const m of topIn(coarse, cI, t, t.tw, t.th, Math.floor(reg[0] * coarse.w) - 1, Math.ceil(reg[2] * coarse.w), Math.floor(reg[1] * coarse.h) - 1, Math.ceil(reg[3] * coarse.h), 1, floor, PER_SIZE)) cands.push({ ...m, s, tw: t.tw, th: t.th })
   }
-  cands.sort((p, q) => q.score - p.score)
+  // The best few places of EACH size are refined, not the best few overall: a small template correlates with almost any blob, so its scores run high and,
+  // ranked together, small sizes crowd out the size of the real mark. (Candidates come from topIn best first, so the first REFINE_PER_SIZE of a size are its best.)
+  const picked = []
+  for (const s of list) picked.push(...cands.filter((c) => c.s === s).slice(0, REFINE_PER_SIZE))
   const fI = integrals(map.E, w, h)
   let best = { score: -1 }
-  for (const c of cands.slice(0, 3)) {
+  for (const c of picked) {
     for (const f of [0.95, 1, 1.05]) {
       const s = c.s * f
       const t = templateAt(tpl, s)
