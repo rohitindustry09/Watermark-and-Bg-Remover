@@ -359,8 +359,21 @@ export const FINE_EDGE = 800
 export const FINE_STRENGTH_SHARE = 0.5
 export const FINE_SCALES = [0.2, 0.25, 0.31, 0.39, 0.49, 0.61].map((s) => s * (FINE_EDGE / WORK_EDGE))
 
+/**
+ * Faint lettering on a busy base correlates less cleanly (a score just under the threshold) but its tint is strong, while the false matches on carving are
+ * weakly tinted. So a normal-size match (not the smallest sizes, which match almost any blob) with a clearly strong tint is accepted at a slightly lower score.
+ * On the images checked this took in lettering that sat on real text and nothing else.
+ */
+export const SOFT_SCORE_SHARE = 0.8
+export const SOFT_STRENGTH_SHARE = 1.6
+export const SOFT_MIN_WIDTH = 50 // map pixels
+
 /** An instance counts as the watermark when it correlates well enough and its letters are tinted strongly enough. */
-export const isWatermark = (instance, tpl) => instance.score >= tpl.threshold && instance.strength >= tpl.minEvidence * (instance.fine ? FINE_STRENGTH_SHARE : 1)
+export const isWatermark = (instance, tpl) => {
+  if (instance.strength < tpl.minEvidence * (instance.fine ? FINE_STRENGTH_SHARE : 1)) return false
+  if (instance.score >= tpl.threshold) return true
+  return !instance.fine && instance.tw >= SOFT_MIN_WIDTH && instance.score >= tpl.threshold * SOFT_SCORE_SHARE && instance.strength >= tpl.minEvidence * SOFT_STRENGTH_SHARE
+}
 
 /** The learned letter shape as a 0/1 plane at the matched size (map pixels), thresholded so the letters are covered with a little margin. */
 export function shapeAt(tpl, tw, th) {

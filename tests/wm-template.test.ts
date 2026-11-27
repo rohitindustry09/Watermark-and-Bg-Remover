@@ -180,6 +180,28 @@ describe('findAll and isWatermark', () => {
   })
 })
 
+describe('isWatermark: the soft rule for strongly tinted marks', () => {
+  const pat = { threshold: 0.63, minEvidence: 4.3 }
+  const m = (score: number, strength: number, tw = 100, fine = false) => ({ score, strength, tw, fine })
+
+  it('accepts a normal-size match just under the threshold when its tint is clearly strong', () => {
+    expect(tpl.isWatermark(m(0.6, 9), pat)).toBe(true)
+    expect(tpl.isWatermark(m(0.62, 8.2), pat)).toBe(true)
+  })
+
+  it('still rejects a weakly tinted match, a much lower score, a tiny size and a fine-look-only match', () => {
+    expect(tpl.isWatermark(m(0.6, 5), pat)).toBe(false) // tint not strong enough for the soft rule
+    expect(tpl.isWatermark(m(0.45, 12), pat)).toBe(false) // score too low
+    expect(tpl.isWatermark(m(0.6, 12, 40), pat)).toBe(false) // the smallest sizes match almost any blob
+    expect(tpl.isWatermark(m(0.6, 12, 100, true), pat)).toBe(false)
+  })
+
+  it('keeps the strict rule: a good score needs the normal strength, and below it nothing passes', () => {
+    expect(tpl.isWatermark(m(0.7, 4.5), pat)).toBe(true)
+    expect(tpl.isWatermark(m(0.7, 3), pat)).toBe(false)
+  })
+})
+
 describe('searchScales', () => {
   const samples = [sample(50, 200, 1), sample(120, 180, 1.1), sample(80, 220, 0.9), sample(200, 150, 1), sample(30, 100, 1.05), sample(150, 240, 0.95), sample(220, 60, 1)]
   const { tpl: learned } = tpl.learnTemplate(samples)
