@@ -4,7 +4,7 @@ import sharp from 'sharp'
 import { dilateBinary } from './vendor/wm.mjs'
 import { detectInWorker, findInWorker } from './wm-pool.mjs'
 import { onRedSurface } from './context.mjs'
-import { evidenceMap, FINE_EDGE, FINE_SCALES, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
+import { EXTEND_SHARE, evidenceMap, FINE_EDGE, FINE_SCALES, isWatermark, refineMatch, resample, WORK_EDGE } from './wm-template.mjs'
 
 export const LAMA_SIZE = 512
 export const LAMA_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx'
@@ -59,6 +59,46 @@ async function detectIn(rgba, width, height) {
  * boxes of the marks (`tight` = the letters' own boxes) and how many marks were found. The mask is all zero when nothing was found.
  */
 export const findWatermark = detectIn
+
+/**
+ * Follows a line of lettering past the right end of the match. The learned pattern ends before the last letters of the mark, and the mark can be bigger than
+ * the nearest size searched, so letters can stick out beyond the mask. From the right end, column by column, the mask is extended over tinted pixels in the
+ * rows of the match, while at least a quarter of the rows are tinted (gaps up to a letter space are crossed), for at most `maxExt` columns. Rightwards only:
+ * going left picked up stray tinted specks on carving and enamel. `box` is the match in the window's pixels; `E` the window's evidence.
+ */
+export function extendAlongLine(plane, w, h, E, box, maxExt, reach) {
+  const under = []
+  for (let y = Math.max(0, box.y0); y < Math.min(h, box.y1); y++) {
+    for (let x = Math.max(0, box.x0); x < Math.min(w, box.x1); x++) if (plane[y * w + x]) under.push(E[y * w + x])
+  }
+  if (under.length < 50) return
+  under.sort((a, b) => a - b)
+  const need = Math.max(1.5, 0.25 * under[Math.floor(under.length * 0.75)])
+  const y0 = Math.max(0, box.y0 - 1)
+  const y1 = Math.min(h - 1, box.y1)
+  const gapMax = Math.max(3, Math.round((box.x1 - box.x0) * 0.05))
+  const added = new Uint8Array(w * h)
+  // Rightwards only: the pattern starts at the "D" but ends before the last letters, so that is where the mask comes up short. Going left picked up stray tinted
+  // specks on carving and enamel (seen on real images).
+  const denseEnough = Math.max(2, Math.round((y1 - y0 + 1) * 0.25))
+  for (const dir of [1]) {
+    const start = dir < 0 ? box.x0 - 1 : box.x1
+    let last = null
+    let gap = 0
+    for (let n = 0, x = start; n < maxExt && x >= 0 && x < w; n++, x += dir) {
+      let hits = 0
+      for (let y = y0; y <= y1; y++) if (E[y * w + x] >= need) hits++
+      if (hits >= denseEnough) {
+        last = x
+        gap = 0
+      } else if (++gap > gapMax) break
+    }
+    if (last === null) continue
+    for (let x = start; dir < 0 ? x >= last : x <= last; x += dir) for (let y = y0; y <= y1; y++) if (E[y * w + x] >= need) added[y * w + x] = 1
+  }
+  const grown = dilateBinary(added, w, h, reach)
+  for (let i = 0; i < grown.length; i++) if (grown[i]) plane[i] = 1
+}
 
 /**
  * Adds, in place, the pixels next to the mask that still carry the watermark's tint (an anti-aliased edge, a letter the learned shape was a little short
@@ -187,6 +227,11 @@ export async function findByTemplate(rgba, width, height, tpl) {
     }
     local = dilateBinary(local, win.w, win.h, Math.max(2, Math.round((up * 0.75) / k))) // a little margin over the letters' soft edge
     if (win.E) growOntoEvidence(local, win.w, { E: win.E, left: 0, top: 0, w: win.w, h: win.h }, Math.max(2, Math.round((up * 1.25) / k)))
+    // follow the lettering past the match, but not where the statue itself is red or orange: there the tint continues without being letters
+    if (win.E && !onRedSurface(rgba, width, height, [x0 * k, y0 * k, (x0 + tw) * k, (y0 + th) * k])) {
+      const box = { x0: x0 - win.left, x1: x0 + tw - win.left, y0: y0 - win.top, y1: y0 + th - win.top }
+      extendAlongLine(local, win.w, win.h, win.E, box, Math.round(tw * EXTEND_SHARE), Math.max(2, Math.round((up * 1.25) / k)))
+    }
     // scale the window mask up to the photo's pixels (each refinement pixel covers k x k of them)
     const fx0 = Math.floor(win.left * k)
     const fy0 = Math.floor(win.top * k)

@@ -247,6 +247,8 @@ export function matchTemplate(map, tpl, { region, scales, minMean } = {}) {
  * the evidence crop) is in those refinement pixels; `k` is how many real pixels one of them covers (1 up to a 1600 px photo, more above that).
  */
 const REFINE_SCALE = 4
+/** How far the mask may follow lettering beyond the match on each side, as a share of the match width. */
+export const EXTEND_SHARE = 0.3
 
 export function refineMatch(rgba, width, height, map, tpl, match) {
   const up = Math.max(width, height) / WORK_EDGE
@@ -255,9 +257,10 @@ export function refineMatch(rgba, width, height, map, tpl, match) {
   const samples = Math.max(1, Math.round(k))
   const rw = Math.max(1, Math.round(width / k))
   const rh = Math.max(1, Math.round(height / k))
-  const gx0 = Math.max(0, Math.floor((match.x - 3) * ref))
+  const side = match.tw * EXTEND_SHARE // room on each side for lettering that runs on past the match (see extendAlongLine)
+  const gx0 = Math.max(0, Math.floor((match.x - 3 - side) * ref))
   const gy0 = Math.max(0, Math.floor((match.y - 3) * ref))
-  const gx1 = Math.min(rw, Math.ceil((match.x + match.tw + 3) * ref))
+  const gx1 = Math.min(rw, Math.ceil((match.x + match.tw + 3 + side) * ref))
   const gy1 = Math.min(rh, Math.ceil((match.y + match.th + 3) * ref))
   const cw = gx1 - gx0
   const ch = gy1 - gy0
