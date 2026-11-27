@@ -1,0 +1,3 @@
+*.npy
+*.pt
+__pycache__/
